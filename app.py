@@ -22,13 +22,12 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📚 Gestor Bibliotecario V43")
-st.markdown("Mejora: **Búsqueda Refinada**. Los enlaces ahora buscan solo 'Autor + Título + Año' en Google General.")
+st.title("📚 Gestor Bibliotecario V44")
+st.markdown("Mejora: **Soporte para Listas Simples**. Puedes subir un archivo con solo una columna de referencias.")
 
-# --- LÓGICA DE LIMPIEZA Y BÚSQUEDA ---
+# --- LÓGICA AUXILIAR ---
 
 def limpiar_texto(texto):
-    """Limpieza para el algoritmo de cruce (interno)"""
     if pd.isna(texto): return ""
     t = str(texto).lower()
     t = re.sub(r'http\S+|www\.\S+', '', t) 
@@ -38,45 +37,29 @@ def limpiar_texto(texto):
     return " ".join(t.split())
 
 def generar_query_busqueda(raw_ref):
-    """
-    Genera un string limpio para buscadores externos (Autor + Titulo + Año).
-    Elimina editorial, ciudad, paginas, etc.
-    """
     if pd.isna(raw_ref): return ""
     s = str(raw_ref)
-    
-    # 1. Extraer Año
     year = ""
     year_match = re.search(r'\b(19|20)\d{2}\b', s)
-    if year_match:
-        year = year_match.group(0)
+    if year_match: year = year_match.group(0)
     
-    # 2. Extraer Autor y Título (Heurística: Primeros 2 segmentos separados por punto)
-    # Ej: "Malliavin, P. (1995). Integration..." -> ["Malliavin, P", "Integration..."]
-    # Quitamos parentesis de año para que no estorben en el split
     s_clean = re.sub(r'\(\d{4}\)', '', s)
     parts = s_clean.split('.')
-    
-    # Tomamos las primeras 2 partes significativas (Autor y Título)
     core_text = ""
     count = 0
     for p in parts:
-        if len(p.strip()) > 2: # Ignorar fragmentos vacíos
+        if len(p.strip()) > 2:
             core_text += p + " "
             count += 1
-        if count >= 2: break # Solo queremos Autor y Título, nada más.
+        if count >= 2: break
     
-    # Si la referencia no tenía puntos, tomamos las primeras 8 palabras
     if len(core_text) < 5:
         words = s_clean.split()
         core_text = " ".join(words[:8])
 
-    # Limpieza final de caracteres raros
     core_text = re.sub(r'[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ ]', ' ', core_text)
-    
-    # Combinar: Autor Título Año
     query = f"{core_text} {year}".strip()
-    return " ".join(query.split()) # Quitar espacios dobles
+    return " ".join(query.split())
 
 def tokenize(str_val):
     if not str_val: return []
@@ -96,7 +79,7 @@ def cargar_archivo(uploaded_file):
     try: uploaded_file.seek(0); return pd.read_excel(uploaded_file, engine='openpyxl')
     except Exception as e: st.error(f"Error: {e}"); return None
 
-# --- LÓGICA DE VALIDACIÓN (V42) ---
+# --- LÓGICA DE VALIDACIÓN ---
 def validar_match(ref_tokens, book):
     t_hits = sum(1 for t in book['tTokens'] if t in ref_tokens)
     t_len = len(book['tTokens'])
@@ -130,14 +113,25 @@ def procesar_datos(file_ref, file_cat):
     if df_ref is None or df_cat is None: return pd.DataFrame()
 
     df_cat.columns = df_cat.columns.str.lower().str.strip()
-    df_ref.columns = df_ref.columns.str.lower().str.strip()
+    # No normalizamos df_ref todavía para respetar la primera columna si no tiene nombre
 
+    # --- DETECCIÓN INTELIGENTE DE COLUMNA REFERENCIA (V44) ---
+    col_ref = None
+    # 1. Buscar nombres típicos
+    candidatos = [c for c in df_ref.columns if 'ref' in str(c).lower() or 'bib' in str(c).lower()]
+    if candidatos:
+        col_ref = candidatos[0]
+    else:
+        # 2. Si no hay nombre conocido, USAR LA PRIMERA COLUMNA (Tu petición)
+        col_ref = df_ref.columns[0]
+        st.info(f"ℹ️ No se detectó encabezado 'Referencias'. Usando la primera columna: **{col_ref}**")
+
+    # Detección de Catálogo (Se mantiene estricta porque el catálogo es complejo)
     try:
-        col_ref = [c for c in df_ref.columns if 'ref' in c or 'bib' in c][0]
         col_tit = [c for c in df_cat.columns if 'tit' in c][0]
         col_aut = [c for c in df_cat.columns if 'aut' in c][0]
     except:
-        st.error("Error en columnas.")
+        st.error("Error: El Catálogo debe tener columnas 'Título' y 'Autor'.")
         return pd.DataFrame()
     
     col_stock = next((c for c in df_cat.columns if any(x in c for x in ['ejem', 'copia', 'stock', 'cant'])), None)
@@ -186,13 +180,11 @@ def procesar_datos(file_ref, file_cat):
         tipo = "Libro"
         obs = ""
         
-        # --- GENERACIÓN DE LINK REFINADO (V43) ---
         query_optimizada = generar_query_busqueda(raw)
         q_url = query_optimizada.replace(' ', '+')
         
         link_bf = f"https://www.bookfinder.com/search/?keywords={q_url}&mode=basic&st=sr&ac=qr"
         link_bl = f"https://www.buscalibre.cl/libros/search?q={q_url}"
-        # Google General (Sin tbm=bks)
         link_gg = f"https://www.google.com/search?q={q_url}"
 
         if es_articulo_real(raw):
@@ -230,8 +222,7 @@ def procesar_datos(file_ref, file_cat):
             "Match": match_nom,
             "Tipo": tipo,
             "Observaciones": obs,
-            "Link_BF": link_bf, "Link_BL": link_bl, "Link_GG": link_gg,
-            "Query Usada": query_optimizada # Para depuración en el Excel
+            "Link_BF": link_bf, "Link_BL": link_bl, "Link_GG": link_gg
         })
     
     progress_bar.progress(100)
@@ -239,7 +230,7 @@ def procesar_datos(file_ref, file_cat):
 
 # --- INTERFAZ ---
 c1, c2 = st.columns(2)
-f1 = c1.file_uploader("1. Referencias", type=['csv','xlsx'])
+f1 = c1.file_uploader("1. Referencias (Lista Simple o Completa)", type=['csv','xlsx'])
 f2 = c2.file_uploader("2. Catálogo", type=['csv','xlsx'])
 
 if f1 and f2:
@@ -253,7 +244,7 @@ if f1 and f2:
         m3.metric("Faltantes", len(faltantes))
         
         st.divider()
-        st.subheader(f"🛒 Lista de Faltantes ({len(faltantes)})")
+        st.subheader(f"🛒 Cotizador de Faltantes ({len(faltantes)})")
         if not faltantes.empty:
             for i, r in faltantes.iterrows():
                 txt = r['Referencia'][:100] + "..."
@@ -270,4 +261,4 @@ if f1 and f2:
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False)
-        st.download_button("📥 Descargar Excel", buf, "Resultado_Final_V43.xlsx")
+        st.download_button("📥 Descargar Excel", buf, "Resultado_Final_V44.xlsx")
