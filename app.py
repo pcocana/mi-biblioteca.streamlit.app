@@ -7,7 +7,7 @@ import io
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Gestor Bibliotecario AI", page_icon="📚", layout="wide")
 
-st.title("📚 Gestor Bibliotecario Inteligente V36")
+st.title("📚 Gestor Bibliotecario Inteligente V38")
 st.markdown("""
 Esta aplicación cruza automáticamente tu lista de **Referencias** con el **Catálogo**, 
 detectando existencias reales, artículos científicos y corrigiendo errores de escritura.
@@ -29,36 +29,44 @@ def es_articulo_real(texto):
     palabras_clave = ['revista', 'journal', 'doi.org', 'issn', 'transactions', 'proceedings', 'vol.', 'no.']
     return any(p in t for p in palabras_clave)
 
-# --- FUNCIÓN DE CARGA BLINDADA (AQUÍ ESTÁ EL ARREGLO) ---
+# --- FUNCIÓN DE CARGA BLINDADA V38 ---
 def cargar_archivo(uploaded_file):
-    """Intenta leer CSV o Excel rebobinando el archivo si falla"""
+    """Intenta leer con múltiples codificaciones para evitar errores de Windows/Excel"""
     if uploaded_file is None: return None
     
-    # Intento 1: CSV
+    # 1. INTENTO: CSV con UTF-8 (Estándar moderno)
     try:
-        uploaded_file.seek(0) # Rebobinar al principio
-        return pd.read_csv(uploaded_file, sep=None, engine='python')
+        uploaded_file.seek(0)
+        return pd.read_csv(uploaded_file, sep=None, engine='python', encoding='utf-8')
     except:
-        pass # Si falla, continuamos silenciosamente
+        pass # Falló, probamos el siguiente
 
-    # Intento 2: Excel
+    # 2. INTENTO: CSV con Latin-1 (Estándar Windows/Excel Español)
+    # Este es el que suele arreglar el problema que tienes
     try:
-        uploaded_file.seek(0) # Rebobinar OTRA VEZ es vital para que funcione
+        uploaded_file.seek(0)
+        return pd.read_csv(uploaded_file, sep=None, engine='python', encoding='latin-1')
+    except:
+        pass
+
+    # 3. INTENTO: Excel (.xlsx)
+    try:
+        uploaded_file.seek(0)
         return pd.read_excel(uploaded_file, engine='openpyxl')
     except Exception as e:
-        st.error(f"No se pudo leer el archivo {uploaded_file.name}. Asegúrate de que sea un Excel o CSV válido.")
+        st.error(f"❌ Error leyendo {uploaded_file.name}. No es un CSV ni un Excel válido. Detalle: {e}")
         return None
 
 @st.cache_data
 def procesar_datos(file_ref, file_cat):
-    # Usamos la nueva función de carga segura
+    # Usamos la nueva función de carga V38
     df_ref = cargar_archivo(file_ref)
     df_cat = cargar_archivo(file_cat)
 
     if df_ref is None or df_cat is None:
-        return pd.DataFrame() # Retorna vacío si falló la carga
+        return pd.DataFrame()
 
-    # Normalizar columnas
+    # Normalizar nombres de columnas
     df_cat.columns = df_cat.columns.str.lower().str.strip()
     df_ref.columns = df_ref.columns.str.lower().str.strip()
 
@@ -68,7 +76,7 @@ def procesar_datos(file_ref, file_cat):
         col_tit = [c for c in df_cat.columns if 'tit' in c][0]
         col_aut = [c for c in df_cat.columns if 'aut' in c][0]
     except IndexError:
-        st.error("Error: No se encuentran las columnas clave (Referencias, Título, Autor). Revisa los nombres en tu Excel.")
+        st.error("⚠️ Error: No se encuentran las columnas clave (Referencias, Título, Autor). Revisa los encabezados.")
         return pd.DataFrame()
     
     # Stock
@@ -80,7 +88,7 @@ def procesar_datos(file_ref, file_cat):
     df_cat['busqueda_clean'] = df_cat['busqueda'].apply(limpiar_texto)
 
     if col_stock:
-        # Limpieza de la columna stock para evitar errores de suma
+        # Limpieza de la columna stock
         df_cat[col_stock] = pd.to_numeric(df_cat[col_stock], errors='coerce').fillna(1)
         catalogo = df_cat.groupby('busqueda_clean')[col_stock].sum().to_dict()
         catalogo_nombres = df_cat.groupby('busqueda_clean')[col_tit].first().to_dict()
