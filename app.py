@@ -43,10 +43,10 @@ def cargar_archivo(uploaded_file):
 
     # Intento 2: Excel
     try:
-        uploaded_file.seek(0) # Rebobinar OTRA VEZ es vital
+        uploaded_file.seek(0) # Rebobinar OTRA VEZ es vital para que funcione
         return pd.read_excel(uploaded_file, engine='openpyxl')
     except Exception as e:
-        st.error(f"No se pudo leer el archivo {uploaded_file.name}. Error: {e}")
+        st.error(f"No se pudo leer el archivo {uploaded_file.name}. Asegúrate de que sea un Excel o CSV válido.")
         return None
 
 @st.cache_data
