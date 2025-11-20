@@ -7,13 +7,13 @@ import io
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Gestor Bibliotecario AI", page_icon="📚", layout="wide")
 
-# Estilos CSS para los botones de cotización
+# Estilos CSS para botones
 st.markdown("""
 <style>
     .stButton button { width: 100%; }
     .cot-btn {
         display: inline-block;
-        padding: 5px 10px;
+        padding: 6px 12px;
         margin: 0 2px;
         border-radius: 4px;
         text-decoration: none;
@@ -21,16 +21,17 @@ st.markdown("""
         font-size: 12px;
         font-weight: bold;
         text-align: center;
+        transition: 0.2s;
     }
-    .bf { background-color: #341f97; } /* BookFinder */
-    .bl { background-color: #fbc531; color: #2f3640 !important; } /* Buscalibre */
-    .gg { background-color: #7f8fa6; } /* Google */
-    .bf:hover, .bl:hover, .gg:hover { opacity: 0.8; }
+    .bf { background-color: #341f97; } 
+    .bl { background-color: #fbc531; color: #2f3640 !important; } 
+    .gg { background-color: #7f8fa6; } 
+    .cot-btn:hover { opacity: 0.8; transform: translateY(-1px); }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📚 Gestor Bibliotecario V39")
-st.markdown("Cruce inteligente de inventario con **Cotizador Web Integrado**.")
+st.title("📚 Gestor Bibliotecario V40")
+st.markdown("Corrección: Los libros con 'Vol.' ya no se confunden con artículos.")
 
 # --- FUNCIONES DE LÓGICA ---
 
@@ -45,11 +46,12 @@ def limpiar_texto(texto):
 
 def es_articulo_real(texto):
     t = str(texto).lower()
-    palabras_clave = ['revista', 'journal', 'doi.org', 'issn', 'transactions', 'proceedings', 'vol.', 'no.']
+    # HE QUITADO 'vol.' y 'no.' DE ESTA LISTA PARA ARREGLAR EL ERROR DE BOGACHEV
+    palabras_clave = ['revista', 'journal', 'doi.org', 'issn', 'transactions', 'proceedings']
     return any(p in t for p in palabras_clave)
 
 def cargar_archivo(uploaded_file):
-    """Lectura blindada de archivos"""
+    """Lectura blindada V38"""
     if uploaded_file is None: return None
     try:
         uploaded_file.seek(0)
@@ -75,7 +77,7 @@ def procesar_datos(file_ref, file_cat):
 
     if df_ref is None or df_cat is None: return pd.DataFrame()
 
-    # Normalizar
+    # Normalizar nombres columnas
     df_cat.columns = df_cat.columns.str.lower().str.strip()
     df_ref.columns = df_ref.columns.str.lower().str.strip()
 
@@ -85,7 +87,7 @@ def procesar_datos(file_ref, file_cat):
         col_tit = [c for c in df_cat.columns if 'tit' in c][0]
         col_aut = [c for c in df_cat.columns if 'aut' in c][0]
     except:
-        st.error("No se detectaron las columnas necesarias (Referencias, Título, Autor).")
+        st.error("Error: No se detectaron columnas clave (Referencias, Titulo, Autor).")
         return pd.DataFrame()
     
     col_stock = next((c for c in df_cat.columns if any(x in c for x in ['ejem', 'copia', 'stock', 'cant'])), None)
@@ -120,16 +122,19 @@ def procesar_datos(file_ref, file_cat):
         tipo = "Libro"
         obs = ""
         
-        # Variables para cotización
+        # Variables cotización
         q_cotiz = re.sub(r'[^a-zA-Z0-9 ]', '', raw).replace(' ', '+')
         link_bf = f"https://www.bookfinder.com/search/?keywords={q_cotiz}&mode=basic&st=sr&ac=qr"
         link_bl = f"https://www.buscalibre.cl/libros/search?q={q_cotiz}"
         link_gg = f"https://www.google.com/search?tbm=bks&q={q_cotiz}"
 
+        # 1. Detector de Artículos (CORREGIDO)
         if es_articulo_real(raw):
             tipo = "Artículo"
             estado = "VERIFICAR ONLINE"
-            link_bf = f"https://scholar.google.com/scholar?q={q_cotiz}" # Reemplazo para artículos
+            link_bf = f"https://scholar.google.com/scholar?q={q_cotiz}"
+        
+        # 2. Búsqueda de Libros
         elif len(clean) > 3:
             match = process.extractOne(clean, lista_claves, scorer=fuzz.token_set_ratio)
             if match:
@@ -175,21 +180,18 @@ if file_ref and file_cat:
         faltantes = df[(df['Stock'] == 0) & (df['Tipo'] == 'Libro')]
         m3.metric("Faltantes (A cotizar)", len(faltantes))
 
-        # --- SECCIÓN DE COTIZACIÓN VISUAL ---
+        # --- COTIZADOR VISUAL ---
         st.divider()
-        st.subheader("🛒 Cotizador Rápido de Faltantes")
+        st.subheader(f"🛒 Lista de Faltantes ({len(faltantes)})")
         
         if not faltantes.empty:
-            # Mostrar tabla interactiva con botones HTML
             for index, row in faltantes.iterrows():
                 ref_text = row['Referencia'][:120] + "..." if len(row['Referencia']) > 120 else row['Referencia']
                 
-                # Layout de fila
                 col_text, col_btns = st.columns([3, 2])
                 with col_text:
                     st.write(f"**{ref_text}**")
                 with col_btns:
-                    # Botones HTML renderizados
                     st.markdown(f"""
                         <a href="{row['Link_BF']}" target="_blank" class="cot-btn bf">BookFinder</a>
                         <a href="{row['Link_BL']}" target="_blank" class="cot-btn bl">Buscalibre</a>
@@ -197,11 +199,11 @@ if file_ref and file_cat:
                     """, unsafe_allow_html=True)
                 st.divider()
         else:
-            st.info("¡Felicidades! No hay libros faltantes para cotizar.")
+            st.info("¡Todo encontrado! No hay libros para cotizar.")
 
-        # Descarga Excel
+        # Excel
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False)
         
-        st.download_button("📥 Descargar Excel Completo", buffer, "Resultado_Final.xlsx")
+        st.download_button("📥 Descargar Excel Completo", buffer, "Resultado_Final_V40.xlsx")
