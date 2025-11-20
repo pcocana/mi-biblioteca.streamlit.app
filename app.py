@@ -22,52 +22,86 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📚 Gestor Bibliotecario V41")
-st.markdown("Mejora: **Filtro Anti-Genéricos** (Evita matches falsos con títulos cortos como 'Funciones').")
+st.title("📚 Gestor Bibliotecario V42 (Modo Estricto)")
+st.markdown("Mejora: **Validación Cruzada de Autor**. Si el autor no coincide, se marca como Faltante.")
 
-# --- LÓGICA ---
+# --- LÓGICA DE LIMPIEZA ---
 
 def limpiar_texto(texto):
     if pd.isna(texto): return ""
     t = str(texto).lower()
-    t = re.sub(r'http\S+|www\.\S+', '', t)
-    t = re.sub(r'\(\d{4}\)', '', t)
+    t = re.sub(r'http\S+|www\.\S+', '', t) # Quitar URLs
+    t = re.sub(r'\(\d{4}\)', '', t) # Quitar años
     t = t.replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ó', 'o').replace('ú', 'u')
-    t = re.sub(r'[^a-z0-9\s]', ' ', t)
+    t = re.sub(r'[^a-z0-9\s]', ' ', t) # Solo letras y numeros
     return " ".join(t.split())
+
+def tokenize(str_val):
+    if not str_val: return []
+    return [w for w in limpiar_texto(str(str_val)).split() if len(w) > 2]
 
 def es_articulo_real(texto):
     t = str(texto).lower()
     palabras_clave = ['revista', 'journal', 'doi.org', 'issn', 'transactions', 'proceedings']
     return any(p in t for p in palabras_clave)
 
-def is_similar(a, b):
-    """Comparación flexible para palabras (Topologia ~= Topology)"""
-    if a == b: return True
-    if abs(len(a) - len(b)) > 3: return False
-    return fuzz.ratio(a, b) > 85 # Usamos fuzz ratio para velocidad y precisión
-
-def tokenize(str_val):
-    if not str_val: return []
-    s = limpiar_texto(str(str_val))
-    return [w for w in s.split() if len(w) > 2]
-
 def cargar_archivo(uploaded_file):
     if uploaded_file is None: return None
-    try:
-        uploaded_file.seek(0)
-        return pd.read_csv(uploaded_file, sep=None, engine='python', encoding='utf-8')
+    try: uploaded_file.seek(0); return pd.read_csv(uploaded_file, sep=None, engine='python', encoding='utf-8')
     except: pass
-    try:
-        uploaded_file.seek(0)
-        return pd.read_csv(uploaded_file, sep=None, engine='python', encoding='latin-1')
+    try: uploaded_file.seek(0); return pd.read_csv(uploaded_file, sep=None, engine='python', encoding='latin-1')
     except: pass
-    try:
-        uploaded_file.seek(0)
-        return pd.read_excel(uploaded_file, engine='openpyxl')
-    except Exception as e:
-        st.error(f"Error leyendo: {e}")
-        return None
+    try: uploaded_file.seek(0); return pd.read_excel(uploaded_file, engine='openpyxl')
+    except Exception as e: st.error(f"Error: {e}"); return None
+
+# --- LÓGICA DE VALIDACIÓN ESTRICTA (EL CEREBRO V42) ---
+def validar_match(ref_tokens, book):
+    """
+    Retorna un puntaje de confianza (0-100) basado en Título Y Autor.
+    """
+    # 1. COINCIDENCIA DE TÍTULO (Set Ratio: ignora orden)
+    # ¿Cuántas palabras del título del catálogo están en la referencia?
+    t_hits = sum(1 for t in book['tTokens'] if t in ref_tokens)
+    t_len = len(book['tTokens'])
+    if t_len == 0: return 0
+    
+    ratio_titulo = t_hits / t_len
+    
+    # Penalización por longitud: Si la referencia es mucho más larga que el título del catálogo
+    # Ej: Ref="Cálculo de Variaciones Gelfand" vs Cat="Cálculo" -> Peligroso
+    len_diff = abs(len(ref_tokens) - t_len)
+    if len_diff > 3 and ratio_titulo < 1.0: 
+        ratio_titulo -= 0.2 # Bajamos puntaje si los tamaños son muy distintos
+
+    # 2. COINCIDENCIA DE AUTOR (CRÍTICO)
+    # Si el catálogo tiene autor, DEBE aparecer en la referencia
+    a_hits = 0
+    if len(book['aTokens']) > 0:
+        a_hits = sum(1 for a in book['aTokens'] if a in ref_tokens)
+        ratio_autor = a_hits / len(book['aTokens'])
+    else:
+        ratio_autor = 0.5 # Neutro si no hay autor en catálogo (confiamos en título)
+
+    # --- REGLAS DE DECISIÓN ---
+    
+    # CASO A: Título Perfecto + Autor Existe en Ref
+    if ratio_titulo == 1.0 and ratio_autor > 0:
+        return 100
+    
+    # CASO B: Título Muy Bueno (>80%)
+    if ratio_titulo > 0.8:
+        if len(book['aTokens']) > 0:
+            if ratio_autor > 0: return 90 # Título bueno, Autor coincide algo -> APROBADO
+            else: return 40 # Título bueno, pero AUTOR NO COINCIDE -> RECHAZADO
+        else:
+            return 75 # Título bueno, sin autor para validar -> DUDA (Aceptable)
+
+    # CASO C: Título Medio (60-80%)
+    if ratio_titulo > 0.6:
+        if ratio_autor > 0.5: return 80 # Autor salva el match
+        else: return 0 # Si el título no es perfecto y el autor no está -> BASURA
+
+    return 0
 
 @st.cache_data
 def procesar_datos(file_ref, file_cat):
@@ -83,27 +117,27 @@ def procesar_datos(file_ref, file_cat):
         col_tit = [c for c in df_cat.columns if 'tit' in c][0]
         col_aut = [c for c in df_cat.columns if 'aut' in c][0]
     except:
-        st.error("Error en nombres de columnas.")
+        st.error("Error en columnas.")
         return pd.DataFrame()
     
     col_stock = next((c for c in df_cat.columns if any(x in c for x in ['ejem', 'copia', 'stock', 'cant'])), None)
 
-    # Pre-procesar catálogo con tokens
+    # Pre-procesar catálogo (Lista de Objetos para iterar rápido)
     catalogo_objs = []
     
-    # Mapa para agrupar duplicados
+    # Mapa para sumar stock de duplicados antes de procesar
     stock_map = {} 
 
     for idx, row in df_cat.iterrows():
         title = str(row[col_tit])
         author = str(row[col_aut]) if pd.notna(row[col_aut]) else ""
         
-        if len(title) < 2: continue
+        if len(title) < 2: continue # Ignorar basura
 
         t_tokens = tokenize(title)
         a_tokens = tokenize(author)
         
-        # Clave única
+        # Clave única (Título+Autor) para agrupar
         key = "_".join(t_tokens) + "|" + "_".join(a_tokens)
         
         qty = 1
@@ -120,14 +154,14 @@ def procesar_datos(file_ref, file_cat):
                 'tTokens': t_tokens,
                 'aTokens': a_tokens,
                 'stock': qty,
-                'cleanTitle': " ".join(t_tokens),
-                'cleanAuth': " ".join(a_tokens)
+                'cleanTitle': " ".join(t_tokens) # Para búsqueda rápida
             }
             stock_map[key] = obj
             catalogo_objs.append(obj)
 
-    # Fuse Index para búsqueda rápida (solo por título limpio)
-    titulos_limpios = [c['cleanTitle'] for c in catalogo_objs]
+    # Lista final optimizada
+    catalogo_final = list(stock_map.values())
+    titulos_busqueda = [c['cleanTitle'] for c in catalogo_final]
     
     resultados = []
     progress_bar = st.progress(0)
@@ -137,8 +171,8 @@ def procesar_datos(file_ref, file_cat):
         if idx % 10 == 0: progress_bar.progress(min(idx / total, 1.0))
         
         raw = str(row[col_ref])
-        clean_ref = limpiar_texto(raw)
         ref_tokens = tokenize(raw)
+        clean_ref = " ".join(ref_tokens)
         
         stock = 0
         estado = "NO ENCONTRADO"
@@ -157,65 +191,33 @@ def procesar_datos(file_ref, file_cat):
             link_bf = f"https://scholar.google.com/scholar?q={q_cotiz}"
         
         elif len(ref_tokens) > 1:
-            # 1. Búsqueda rápida de candidatos por título (RapidFuzz)
-            # Extraemos el titulo probable de la referencia (antes del primer punto o paréntesis)
-            likely_title = clean_ref
-            
-            matches = process.extract(likely_title, titulos_limpios, scorer=fuzz.token_set_ratio, limit=10)
+            # 1. Búsqueda Rápida: Traer los 10 candidatos más parecidos por título
+            matches = process.extract(clean_ref, titulos_busqueda, scorer=fuzz.token_set_ratio, limit=15)
             
             best_score = 0
             best_match = None
 
+            # 2. Validación Fina (El Candado de Autor)
             for match_tuple in matches:
-                match_text, score_fuzzy, match_idx = match_tuple
-                book = catalogo_objs[match_idx]
+                _, _, match_idx = match_tuple
+                book = catalogo_final[match_idx]
                 
-                # --- LÓGICA DE VALIDACIÓN ESTRICTA V41 ---
-                final_score = 0
+                # Función de validación estricta V42
+                score = validar_match(ref_tokens, book)
                 
-                # A. Coincidencia de Título (Palabra por palabra)
-                hits_t = sum(1 for t in book['tTokens'] if t in ref_tokens)
-                ratio_t = hits_t / len(book['tTokens']) if book['tTokens'] else 0
-                
-                # B. Coincidencia de Autor
-                hits_a = sum(1 for a in book['aTokens'] if a in ref_tokens)
-                has_author_match = hits_a > 0
-                
-                # C. REGLA ANTI-GENÉRICOS (El parche clave)
-                # Si el título del catálogo es corto (ej: "Funciones", "Matematica")
-                is_short_title = len(book['cleanTitle']) < 15
-                
-                if is_short_title:
-                    # ¡EXIGIMOS AUTOR! Si título es corto, el autor DEBE coincidir.
-                    if has_author_match:
-                        if ratio_t == 1.0: final_score = 100
-                    else:
-                        # Si título corto y NO hay autor match -> PENALIZACIÓN TOTAL
-                        final_score = 0 
-                else:
-                    # Títulos largos (> 15 chars)
-                    if ratio_t > 0.8: # Título muy parecido
-                        final_score = 80
-                        if has_author_match: final_score += 20 # Bonus autor
-                    elif ratio_t > 0.5 and has_author_match: # Título regular + Autor
-                        final_score = 70
-                
-                # Anti-Espejo (Si título == autor)
-                if book['cleanTitle'] == book['cleanAuth'] and ratio_t < 1:
-                    final_score = 0
-
-                if final_score > best_score:
-                    best_score = final_score
+                if score > best_score:
+                    best_score = score
                     best_match = book
 
-            if best_score >= 70:
+            # 3. Decisión Final
+            if best_score >= 75: # Umbral alto para seguridad
                 stock = best_match['stock']
                 match_nom = best_match['origTitle']
                 estado = "EN BIBLIOTECA" if stock > 0 else "FALTANTE (Stock 0)"
-                obs = f"Match: {match_nom} (Score: {best_score})"
+                obs = f"Match: {match_nom} (Confianza: {best_score}%)"
             else:
                 estado = "FALTANTE"
-                obs = "Sin coincidencia válida"
+                obs = "No se encontró coincidencia de Autor+Título suficiente"
 
         resultados.append({
             "Referencia": raw,
@@ -246,7 +248,7 @@ if f1 and f2:
         m3.metric("Faltantes", len(faltantes))
         
         st.divider()
-        st.subheader("🛒 Cotizador")
+        st.subheader(f"🛒 Lista de Faltantes ({len(faltantes)})")
         if not faltantes.empty:
             for i, r in faltantes.iterrows():
                 txt = r['Referencia'][:100] + "..."
@@ -263,4 +265,4 @@ if f1 and f2:
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False)
-        st.download_button("📥 Descargar Excel", buf, "Resultado_Final_V41.xlsx")
+        st.download_button("📥 Descargar Excel", buf, "Resultado_Final_V42.xlsx")
