@@ -7,11 +7,30 @@ import io
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Gestor Bibliotecario AI", page_icon="📚", layout="wide")
 
-st.title("📚 Gestor Bibliotecario Inteligente V38")
+# Estilos CSS para los botones de cotización
 st.markdown("""
-Esta aplicación cruza automáticamente tu lista de **Referencias** con el **Catálogo**, 
-detectando existencias reales, artículos científicos y corrigiendo errores de escritura.
-""")
+<style>
+    .stButton button { width: 100%; }
+    .cot-btn {
+        display: inline-block;
+        padding: 5px 10px;
+        margin: 0 2px;
+        border-radius: 4px;
+        text-decoration: none;
+        color: white !important;
+        font-size: 12px;
+        font-weight: bold;
+        text-align: center;
+    }
+    .bf { background-color: #341f97; } /* BookFinder */
+    .bl { background-color: #fbc531; color: #2f3640 !important; } /* Buscalibre */
+    .gg { background-color: #7f8fa6; } /* Google */
+    .bf:hover, .bl:hover, .gg:hover { opacity: 0.8; }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("📚 Gestor Bibliotecario V39")
+st.markdown("Cruce inteligente de inventario con **Cotizador Web Integrado**.")
 
 # --- FUNCIONES DE LÓGICA ---
 
@@ -29,66 +48,53 @@ def es_articulo_real(texto):
     palabras_clave = ['revista', 'journal', 'doi.org', 'issn', 'transactions', 'proceedings', 'vol.', 'no.']
     return any(p in t for p in palabras_clave)
 
-# --- FUNCIÓN DE CARGA BLINDADA V38 ---
 def cargar_archivo(uploaded_file):
-    """Intenta leer con múltiples codificaciones para evitar errores de Windows/Excel"""
+    """Lectura blindada de archivos"""
     if uploaded_file is None: return None
-    
-    # 1. INTENTO: CSV con UTF-8 (Estándar moderno)
     try:
         uploaded_file.seek(0)
         return pd.read_csv(uploaded_file, sep=None, engine='python', encoding='utf-8')
     except:
-        pass # Falló, probamos el siguiente
-
-    # 2. INTENTO: CSV con Latin-1 (Estándar Windows/Excel Español)
-    # Este es el que suele arreglar el problema que tienes
+        pass
     try:
         uploaded_file.seek(0)
         return pd.read_csv(uploaded_file, sep=None, engine='python', encoding='latin-1')
     except:
         pass
-
-    # 3. INTENTO: Excel (.xlsx)
     try:
         uploaded_file.seek(0)
         return pd.read_excel(uploaded_file, engine='openpyxl')
     except Exception as e:
-        st.error(f"❌ Error leyendo {uploaded_file.name}. No es un CSV ni un Excel válido. Detalle: {e}")
+        st.error(f"Error leyendo archivo: {e}")
         return None
 
 @st.cache_data
 def procesar_datos(file_ref, file_cat):
-    # Usamos la nueva función de carga V38
     df_ref = cargar_archivo(file_ref)
     df_cat = cargar_archivo(file_cat)
 
-    if df_ref is None or df_cat is None:
-        return pd.DataFrame()
+    if df_ref is None or df_cat is None: return pd.DataFrame()
 
-    # Normalizar nombres de columnas
+    # Normalizar
     df_cat.columns = df_cat.columns.str.lower().str.strip()
     df_ref.columns = df_ref.columns.str.lower().str.strip()
 
-    # Detectar columnas clave
+    # Detectar columnas
     try:
         col_ref = [c for c in df_ref.columns if 'ref' in c or 'bib' in c][0]
         col_tit = [c for c in df_cat.columns if 'tit' in c][0]
         col_aut = [c for c in df_cat.columns if 'aut' in c][0]
-    except IndexError:
-        st.error("⚠️ Error: No se encuentran las columnas clave (Referencias, Título, Autor). Revisa los encabezados.")
+    except:
+        st.error("No se detectaron las columnas necesarias (Referencias, Título, Autor).")
         return pd.DataFrame()
     
-    # Stock
-    posibles_stock = [c for c in df_cat.columns if any(x in c for x in ['ejem', 'copia', 'stock', 'cant'])]
-    col_stock = posibles_stock[0] if posibles_stock else None
+    col_stock = next((c for c in df_cat.columns if any(x in c for x in ['ejem', 'copia', 'stock', 'cant'])), None)
 
-    # Crear Diccionario Maestro
+    # Indexar Catálogo
     df_cat['busqueda'] = df_cat[col_tit].fillna('') + " " + df_cat[col_aut].fillna('')
     df_cat['busqueda_clean'] = df_cat['busqueda'].apply(limpiar_texto)
 
     if col_stock:
-        # Limpieza de la columna stock
         df_cat[col_stock] = pd.to_numeric(df_cat[col_stock], errors='coerce').fillna(1)
         catalogo = df_cat.groupby('busqueda_clean')[col_stock].sum().to_dict()
         catalogo_nombres = df_cat.groupby('busqueda_clean')[col_tit].first().to_dict()
@@ -98,100 +104,104 @@ def procesar_datos(file_ref, file_cat):
 
     lista_claves = list(catalogo.keys())
     
-    # Procesar
     resultados = []
     progress_bar = st.progress(0)
-    total_rows = len(df_ref)
+    total = len(df_ref)
 
     for idx, row in df_ref.iterrows():
-        if idx % 10 == 0: progress_bar.progress(min(idx / total_rows, 1.0))
-
+        if idx % 10 == 0: progress_bar.progress(min(idx / total, 1.0))
+        
         raw = str(row[col_ref])
         clean = limpiar_texto(raw)
         
-        stock_encontrado = 0
+        stock = 0
         estado = "NO ENCONTRADO"
-        match_nombre = ""
+        match_nom = ""
         tipo = "Libro"
-        url_cotiz = ""
         obs = ""
+        
+        # Variables para cotización
+        q_cotiz = re.sub(r'[^a-zA-Z0-9 ]', '', raw).replace(' ', '+')
+        link_bf = f"https://www.bookfinder.com/search/?keywords={q_cotiz}&mode=basic&st=sr&ac=qr"
+        link_bl = f"https://www.buscalibre.cl/libros/search?q={q_cotiz}"
+        link_gg = f"https://www.google.com/search?tbm=bks&q={q_cotiz}"
 
         if es_articulo_real(raw):
             tipo = "Artículo"
             estado = "VERIFICAR ONLINE"
-            obs = "Posible paper/revista"
-            url_cotiz = f"https://scholar.google.com/scholar?q={raw}"
-        
+            link_bf = f"https://scholar.google.com/scholar?q={q_cotiz}" # Reemplazo para artículos
         elif len(clean) > 3:
             match = process.extractOne(clean, lista_claves, scorer=fuzz.token_set_ratio)
-            
             if match:
-                mejor_key, puntaje, _ = match
-                
-                if puntaje >= 70:
-                    stock_encontrado = int(catalogo[mejor_key])
-                    match_nombre = catalogo_nombres.get(mejor_key, "Match encontrado")
-                    estado = "EN BIBLIOTECA" if stock_encontrado > 0 else "FALTANTE (Stock 0)"
-                    obs = f"Similitud: {round(puntaje)}% (Match: {match_nombre})"
+                key, score, _ = match
+                if score >= 70:
+                    stock = int(catalogo[key])
+                    match_nom = catalogo_nombres.get(key, "Match")
+                    estado = "EN BIBLIOTECA" if stock > 0 else "FALTANTE (Stock 0)"
+                    obs = f"Similitud: {int(score)}% ({match_nom})"
                 else:
                     estado = "FALTANTE"
                     obs = "Sin coincidencia suficiente"
-                    q = re.sub(r'[^a-zA-Z0-9 ]', '', raw)
-                    url_cotiz = f"https://www.bookfinder.com/search/?keywords={q.replace(' ', '+')}&mode=basic&st=sr&ac=qr"
 
         resultados.append({
-            "Referencias": raw,
+            "Referencia": raw,
             "Estado": estado,
-            "Stock": stock_encontrado,
-            "Match Catálogo": match_nombre,
+            "Stock": stock,
+            "Match": match_nom,
             "Tipo": tipo,
-            "Link Cotización": url_cotiz,
-            "Observaciones": obs
+            "Observaciones": obs,
+            "Link_BF": link_bf,
+            "Link_BL": link_bl,
+            "Link_GG": link_gg
         })
     
     progress_bar.progress(100)
     return pd.DataFrame(resultados)
 
-# --- INTERFAZ GRÁFICA ---
+# --- INTERFAZ ---
+c1, c2 = st.columns(2)
+file_ref = c1.file_uploader("1. Referencias", type=['csv', 'xlsx'])
+file_cat = c2.file_uploader("2. Catálogo", type=['csv', 'xlsx'])
 
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("1. Cargar Referencias")
-    uploaded_ref = st.file_uploader("Sube archivo de Referencias", type=['csv', 'xlsx', 'xls'])
-
-with col2:
-    st.subheader("2. Cargar Catálogo")
-    uploaded_cat = st.file_uploader("Sube archivo de Catálogo", type=['csv', 'xlsx', 'xls'])
-
-if uploaded_ref and uploaded_cat:
-    if st.button("🚀 INICIAR PROCESAMIENTO", type="primary"):
-        with st.spinner('Procesando bases de datos...'):
-            df_result = procesar_datos(uploaded_ref, uploaded_cat)
+if file_ref and file_cat:
+    if st.button("🚀 PROCESAR", type="primary"):
+        with st.spinner('Analizando biblioteca...'):
+            df = procesar_datos(file_ref, file_cat)
         
-        if not df_result.empty:
-            st.success("¡Proceso Completado!")
-            
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total Referencias", len(df_result))
-            c2.metric("En Biblioteca", len(df_result[df_result['Stock'] > 0]))
-            c3.metric("Faltantes", len(df_result[df_result['Stock'] == 0]))
+        # Métricas
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total", len(df))
+        m2.metric("En Biblioteca", len(df[df['Stock'] > 0]))
+        faltantes = df[(df['Stock'] == 0) & (df['Tipo'] == 'Libro')]
+        m3.metric("Faltantes (A cotizar)", len(faltantes))
 
-            st.dataframe(df_result)
-
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                df_result.to_excel(writer, index=False, sheet_name='Resultados')
-                workbook = writer.book
-                worksheet = writer.sheets['Resultados']
-                link_fmt = workbook.add_format({'font_color': 'blue', 'underline': 1})
+        # --- SECCIÓN DE COTIZACIÓN VISUAL ---
+        st.divider()
+        st.subheader("🛒 Cotizador Rápido de Faltantes")
+        
+        if not faltantes.empty:
+            # Mostrar tabla interactiva con botones HTML
+            for index, row in faltantes.iterrows():
+                ref_text = row['Referencia'][:120] + "..." if len(row['Referencia']) > 120 else row['Referencia']
                 
-                for i, url in enumerate(df_result['Link Cotización']):
-                    if url: worksheet.write_url(i+1, 5, url, link_fmt, string="Cotizar")
+                # Layout de fila
+                col_text, col_btns = st.columns([3, 2])
+                with col_text:
+                    st.write(f"**{ref_text}**")
+                with col_btns:
+                    # Botones HTML renderizados
+                    st.markdown(f"""
+                        <a href="{row['Link_BF']}" target="_blank" class="cot-btn bf">BookFinder</a>
+                        <a href="{row['Link_BL']}" target="_blank" class="cot-btn bl">Buscalibre</a>
+                        <a href="{row['Link_GG']}" target="_blank" class="cot-btn gg">Google</a>
+                    """, unsafe_allow_html=True)
+                st.divider()
+        else:
+            st.info("¡Felicidades! No hay libros faltantes para cotizar.")
 
-            st.download_button(
-                label="📥 Descargar Excel Final",
-                data=buffer,
-                file_name="Planilla_Bibliotecaria_Final.xlsx",
-                mime="application/vnd.ms-excel"
-            )
+        # Descarga Excel
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False)
+        
+        st.download_button("📥 Descargar Excel Completo", buffer, "Resultado_Final.xlsx")
