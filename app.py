@@ -22,10 +22,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📚 Gestor Bibliotecario V44")
-st.markdown("Mejora: **Soporte para Listas Simples**. Puedes subir un archivo con solo una columna de referencias.")
+st.title("📚 Gestor Bibliotecario V45")
+st.markdown("Mejora: **Soporte Nativo de Excel**. Sube tu lista directamente en .xlsx sin convertirla a CSV.")
 
-# --- LÓGICA AUXILIAR ---
+# --- FUNCIONES ---
 
 def limpiar_texto(texto):
     if pd.isna(texto): return ""
@@ -71,15 +71,26 @@ def es_articulo_real(texto):
     return any(p in t for p in palabras_clave)
 
 def cargar_archivo(uploaded_file):
+    """Carga inteligente: Prioriza Excel si es .xlsx, sino prueba CSVs"""
     if uploaded_file is None: return None
+    
+    # Detección por extensión para evitar el error de 'zip file'
+    if uploaded_file.name.endswith('.xlsx'):
+        try:
+            uploaded_file.seek(0)
+            return pd.read_excel(uploaded_file, engine='openpyxl')
+        except Exception as e:
+            st.warning(f"Intentando leer Excel como CSV por seguridad... ({e})")
+    
+    # Fallback o CSV directo
     try: uploaded_file.seek(0); return pd.read_csv(uploaded_file, sep=None, engine='python', encoding='utf-8')
     except: pass
     try: uploaded_file.seek(0); return pd.read_csv(uploaded_file, sep=None, engine='python', encoding='latin-1')
     except: pass
-    try: uploaded_file.seek(0); return pd.read_excel(uploaded_file, engine='openpyxl')
-    except Exception as e: st.error(f"Error: {e}"); return None
+    
+    return None
 
-# --- LÓGICA DE VALIDACIÓN ---
+# --- VALIDACIÓN ---
 def validar_match(ref_tokens, book):
     t_hits = sum(1 for t in book['tTokens'] if t in ref_tokens)
     t_len = len(book['tTokens'])
@@ -113,20 +124,24 @@ def procesar_datos(file_ref, file_cat):
     if df_ref is None or df_cat is None: return pd.DataFrame()
 
     df_cat.columns = df_cat.columns.str.lower().str.strip()
-    # No normalizamos df_ref todavía para respetar la primera columna si no tiene nombre
-
-    # --- DETECCIÓN INTELIGENTE DE COLUMNA REFERENCIA (V44) ---
+    
+    # --- DETECCIÓN INTELIGENTE DE COLUMNA REFERENCIA V45 ---
+    # Si subes un Excel con 1 sola columna, la usa.
+    # Si subes el Excel antiguo con muchas columnas, busca la correcta.
     col_ref = None
-    # 1. Buscar nombres típicos
-    candidatos = [c for c in df_ref.columns if 'ref' in str(c).lower() or 'bib' in str(c).lower()]
-    if candidatos:
-        col_ref = candidatos[0]
-    else:
-        # 2. Si no hay nombre conocido, USAR LA PRIMERA COLUMNA (Tu petición)
+    
+    if len(df_ref.columns) == 1:
         col_ref = df_ref.columns[0]
-        st.info(f"ℹ️ No se detectó encabezado 'Referencias'. Usando la primera columna: **{col_ref}**")
+    else:
+        # Buscar 'referencias' o 'bibliografia'
+        candidatos = [c for c in df_ref.columns if 'ref' in str(c).lower() or 'bib' in str(c).lower()]
+        if candidatos:
+            col_ref = candidatos[0]
+        else:
+            # Si no encuentra nombre, usa la primera columna por defecto
+            col_ref = df_ref.columns[0]
 
-    # Detección de Catálogo (Se mantiene estricta porque el catálogo es complejo)
+    # Catálogo
     try:
         col_tit = [c for c in df_cat.columns if 'tit' in c][0]
         col_aut = [c for c in df_cat.columns if 'aut' in c][0]
@@ -230,8 +245,8 @@ def procesar_datos(file_ref, file_cat):
 
 # --- INTERFAZ ---
 c1, c2 = st.columns(2)
-f1 = c1.file_uploader("1. Referencias (Lista Simple o Completa)", type=['csv','xlsx'])
-f2 = c2.file_uploader("2. Catálogo", type=['csv','xlsx'])
+f1 = c1.file_uploader("1. Referencias (Excel o CSV)", type=['xlsx','csv'])
+f2 = c2.file_uploader("2. Catálogo (Excel o CSV)", type=['xlsx','csv'])
 
 if f1 and f2:
     if st.button("🚀 PROCESAR", type="primary"):
@@ -247,7 +262,7 @@ if f1 and f2:
         st.subheader(f"🛒 Cotizador de Faltantes ({len(faltantes)})")
         if not faltantes.empty:
             for i, r in faltantes.iterrows():
-                txt = r['Referencia'][:100] + "..."
+                txt = str(r['Referencia'])[:100] + "..."
                 c_txt, c_btn = st.columns([3,2])
                 c_txt.write(f"**{txt}**")
                 c_btn.markdown(f"""
@@ -261,4 +276,4 @@ if f1 and f2:
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False)
-        st.download_button("📥 Descargar Excel", buf, "Resultado_Final_V44.xlsx")
+        st.download_button("📥 Descargar Excel", buf, "Resultado_Final_V45.xlsx")
