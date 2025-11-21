@@ -5,28 +5,57 @@ from rapidfuzz import process, fuzz
 import io
 
 # --- CONFIGURACIÓN VISUAL ---
-st.set_page_config(page_title="Gestor Bibliotecario V55", page_icon="🏛️", layout="wide")
+st.set_page_config(page_title="Gestor Bibliotecario V56", page_icon="🏛️", layout="wide")
 
+# CSS PARA LA TABLA BONITA
 st.markdown("""
 <style>
     .stButton button { width: 100%; background-color: #2e86de; color: white; font-weight: bold; }
+    
+    /* Estilos de Tabla Personalizada */
+    .styled-table {
+        border-collapse: collapse;
+        margin: 25px 0;
+        font-size: 0.9em;
+        font-family: sans-serif;
+        min-width: 100%;
+        box-shadow: 0 0 20px rgba(0, 0, 0, 0.15);
+    }
+    .styled-table thead tr {
+        background-color: #2e86de;
+        color: #ffffff;
+        text-align: left;
+    }
+    .styled-table th, .styled-table td {
+        padding: 12px 15px;
+        border-bottom: 1px solid #dddddd;
+    }
+    .styled-table tbody tr:nth-of-type(even) {
+        background-color: #f3f3f3;
+    }
+    .styled-table tbody tr:last-of-type {
+        border-bottom: 2px solid #2e86de;
+    }
+    
+    /* Estilos de Botones */
     .cot-btn {
-        display: inline-block; padding: 6px 12px; margin: 0 2px;
+        display: inline-block; padding: 5px 10px; margin: 0 2px;
         border-radius: 4px; text-decoration: none; color: white !important;
-        font-size: 12px; font-weight: bold; text-align: center; transition: 0.2s;
+        font-size: 11px; font-weight: bold; text-align: center; transition: 0.2s;
+        white-space: nowrap;
     }
     .bf { background-color: #341f97; } 
     .bl { background-color: #fbc531; color: #2f3640 !important; } 
     .gg { background-color: #7f8fa6; } 
+    .gs { background-color: #4285F4; } /* Google Scholar Blue */
     .cot-btn:hover { opacity: 0.8; transform: translateY(-1px); }
-    .report-box { padding: 15px; border-radius: 10px; background-color: #f1f2f6; border: 1px solid #ced6e0; margin-bottom: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏛️ Gestor Bibliotecario V55")
-st.markdown("Motor de Acumulación V54 + Cotizador Visual Integrado.")
+st.title("🏛️ Gestor Bibliotecario V56")
+st.markdown("Diseño Final: **Tabla Interactiva**. Combina el orden de Excel con la potencia de la Web.")
 
-# --- 1. FUNCIONES DE LIMPIEZA Y BÚSQUEDA ---
+# --- 1. FUNCIONES DE LIMPIEZA Y LÓGICA ---
 
 def limpiar_texto(texto):
     if pd.isna(texto): return ""
@@ -37,20 +66,15 @@ def limpiar_texto(texto):
     return " ".join(t.split())
 
 def generar_query_busqueda(raw_ref):
-    """Genera una búsqueda limpia para los botones (Autor + Título + Año)"""
     if pd.isna(raw_ref): return ""
     s = str(raw_ref).replace('“', '').replace('”', '')
-    
     year = ""
     match = re.search(r'\b(19|20)\d{2}\b', s)
     if match: year = match.group(0)
-    
-    s_clean = re.sub(r'\(\d{4}\)', '', s) # Quitar año parentesis
-    # Limpiar caracteres raros y tomar primeras 10 palabras
+    s_clean = re.sub(r'\(\d{4}\)', '', s)
     core = re.sub(r'[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ ]', ' ', s_clean)
     words = core.split()
     short_core = " ".join(words[:12])
-    
     return f"{short_core} {year}".strip()
 
 def es_articulo_real(texto):
@@ -67,7 +91,7 @@ def extraer_anio(texto):
 def generar_tokens(texto):
     return set(limpiar_texto(texto).split())
 
-# --- 2. LECTURA DE ARCHIVOS (ROBUSTA) ---
+# --- 2. LECTURA MANUAL ROBUSTA ---
 
 def leer_referencias_raw(uploaded_file):
     try:
@@ -79,18 +103,16 @@ def leer_referencias_raw(uploaded_file):
             line = line.strip()
             if not line: continue
             if "Referencia" in line and "Unidad" in line: continue
-            
             if len(line) < 10 or line.count(';') == 0:
                 buffer += " " + line
             else:
                 if buffer: data.append(buffer)
                 buffer = line
         if buffer: data.append(buffer)
-        
         clean_data = [row.split(';')[0] for row in data if len(row) > 5]
         return pd.DataFrame(clean_data, columns=["Referencias"])
     except Exception as e:
-        st.error(f"Error lectura manual: {e}")
+        st.error(f"Error lectura: {e}")
         return pd.DataFrame()
 
 def leer_catalogo_pandas(uploaded_file):
@@ -120,10 +142,9 @@ def procesar_bibliografia(file_ref, file_cat):
         col_stock = [c for c in df_cat.columns if 'ejem' in c or 'copia' in c][0]
         col_anio = [c for c in df_cat.columns if 'fecha' in c or 'año' in c or 'year' in c][0]
     except:
-        st.error("Error columnas catálogo (requiere Título, Autor, Ejemplares, Año)")
+        st.error("Error columnas catálogo")
         return None
 
-    # --- INDEXACIÓN (ACUMULADOR) ---
     catalogo_index = {}
     
     for idx, row in df_cat.iterrows():
@@ -141,11 +162,8 @@ def procesar_bibliografia(file_ref, file_cat):
         
         if clave not in catalogo_index:
             catalogo_index[clave] = {
-                'titulo_oficial': titulo,
-                'autor_oficial': autor,
-                'stock_total': 0,
-                'detalles_anios': [],
-                'tokens_titulo': generar_tokens(titulo),
+                'titulo_oficial': titulo, 'autor_oficial': autor, 'stock_total': 0,
+                'detalles_anios': [], 'tokens_titulo': generar_tokens(titulo),
                 'tokens_autor': generar_tokens(autor)
             }
         
@@ -168,7 +186,7 @@ def procesar_bibliografia(file_ref, file_cat):
         ref_tokens = generar_tokens(raw_ref)
         ref_anio = extraer_anio(raw_ref)
         
-        # Generar Links para Botones
+        # Links
         query_url = generar_query_busqueda(raw_ref).replace(" ", "+")
         link_bf = f"https://www.bookfinder.com/search/?keywords={query_url}&mode=basic&st=sr&ac=qr"
         link_bl = f"https://www.buscalibre.cl/libros/search?q={query_url}"
@@ -178,12 +196,9 @@ def procesar_bibliografia(file_ref, file_cat):
         if es_articulo_real(raw_ref):
             tipo = "Artículo"
             link_bf = f"https://scholar.google.com/scholar?q={query_url}"
-            link_bl = link_bf
-            link_gg = link_bf
 
         # Match
         match = process.extractOne(clean_ref, claves_catalogo, scorer=fuzz.token_set_ratio)
-        
         estado = "NO ENCONTRADO"
         stock_encontrado = 0
         detalle_match = ""
@@ -205,25 +220,20 @@ def procesar_bibliografia(file_ref, file_cat):
                 if stock_encontrado > 0:
                     estado = "EN BIBLIOTECA"
                     detalle_match = libro_cat['titulo_oficial']
-                    info_extra = f"Total: {stock_encontrado} | Copias: {anios_str}"
-                    
+                    info_extra = f"Copias: {anios_str}"
                     if ref_anio > 0:
                         anios_nums = [int(re.search(r'\d+', x).group()) for x in libro_cat['detalles_anios'] if re.search(r'\d+', x)]
                         if anios_nums and max(anios_nums) < ref_anio:
-                            estado = "EN BIBLIOTECA (Desactualizado)"
-                            info_extra += " ⚠️ Solo ediciones antiguas."
+                            estado = "EN BIBLIOTECA (Antiguo)"
+                            info_extra += " ⚠️"
                 else:
                     estado = "FALTANTE (Stock 0)"
             else:
                 estado = "FALTANTE"
 
         resultados.append({
-            "Referencia Original": raw_ref,
-            "Estado": estado,
-            "Stock Total": stock_encontrado,
-            "Detalle Existencias": info_extra,
-            "Match Título": detalle_match,
-            "Tipo": tipo,
+            "Referencia": raw_ref, "Estado": estado, "Stock": stock_encontrado,
+            "Info": info_extra, "Tipo": tipo,
             "Link_BF": link_bf, "Link_BL": link_bl, "Link_GG": link_gg
         })
         
@@ -232,59 +242,63 @@ def procesar_bibliografia(file_ref, file_cat):
 # --- INTERFAZ ---
 
 c1, c2 = st.columns(2)
-archivo_ref = c1.file_uploader("1. Referencias", type=['csv','xlsx'])
-archivo_cat = c2.file_uploader("2. Catálogo", type=['csv','xlsx'])
+f1 = c1.file_uploader("1. Referencias", type=['csv','xlsx'])
+f2 = c2.file_uploader("2. Catálogo", type=['csv','xlsx'])
 
-if archivo_ref and archivo_cat:
-    if st.button("🔍 AUDITAR Y COTIZAR", type="primary"):
-        with st.spinner("Procesando..."):
-            df_final = procesar_bibliografia(archivo_ref, archivo_cat)
+if f1 and f2:
+    if st.button("🔍 PROCESAR", type="primary"):
+        df = procesar_bibliografia(f1, f2)
         
-        if df_final is not None:
-            total = len(df_final)
-            encontrados = len(df_final[df_final['Stock Total'] > 0])
-            faltantes_df = df_final[df_final['Stock Total'] == 0]
+        if df is not None:
+            tot = len(df)
+            enc = len(df[df['Stock'] > 0])
+            fal = len(df[df['Stock'] == 0])
             
-            st.success("Proceso completado")
+            c_a, c_b, c_c = st.columns(3)
+            c_a.metric("Referencias", tot)
+            c_b.metric("En Biblioteca", enc)
+            c_c.metric("Faltantes", fal)
             
-            col_a, col_b, col_c = st.columns(3)
-            col_a.metric("Referencias", total)
-            col_b.metric("En Biblioteca", encontrados)
-            col_c.metric("Faltantes", len(faltantes_df))
-            
-            # --- COTIZADOR VISUAL (VUELVE EL DISEÑO V43) ---
             st.divider()
-            st.subheader(f"🛒 Cotizador de Faltantes ({len(faltantes_df)})")
+            st.subheader("🛒 Cotizador de Faltantes")
+            
+            # --- TABLA HTML PERSONALIZADA (LA MAGIA DE V56) ---
+            faltantes_df = df[(df['Stock'] == 0) & (df['Tipo'] == 'Libro')]
             
             if not faltantes_df.empty:
-                # Mostrar solo los primeros 50 para no saturar, o todos
-                for i, row in faltantes_df.iterrows():
-                    txt = row['Referencia Original'][:120] + "..."
-                    tipo_lbl = f"[{row['Tipo']}]"
+                # Construcción de la tabla HTML
+                html_table = """<table class="styled-table"><thead><tr>
+                    <th>Referencia Bibliográfica</th>
+                    <th style="width:100px">Tipo</th>
+                    <th style="width:250px">Acciones de Cotización</th>
+                </tr></thead><tbody>"""
+                
+                for _, row in faltantes_df.iterrows():
+                    ref_txt = row['Referencia'][:150] + "..."
                     
-                    c_txt, c_btn = st.columns([3, 2])
-                    with c_txt:
-                        st.write(f"**{tipo_lbl} {txt}**")
-                    with c_btn:
-                        if row['Tipo'] == "Artículo":
-                            st.markdown(f"""<a href="{row['Link_BF']}" target="_blank" class="cot-btn gg">Google Scholar</a>""", unsafe_allow_html=True)
-                        else:
-                            st.markdown(f"""
-                                <a href="{row['Link_BF']}" target="_blank" class="cot-btn bf">BookFinder</a>
-                                <a href="{row['Link_BL']}" target="_blank" class="cot-btn bl">Buscalibre</a>
-                                <a href="{row['Link_GG']}" target="_blank" class="cot-btn gg">Google</a>
-                            """, unsafe_allow_html=True)
-                    st.divider()
+                    # Botones
+                    if row['Tipo'] == 'Artículo':
+                        btns = f"""<a href="{row['Link_BF']}" target="_blank" class="cot-btn gs">Google Scholar</a>"""
+                    else:
+                        btns = f"""
+                        <a href="{row['Link_BF']}" target="_blank" class="cot-btn bf">BookFinder</a>
+                        <a href="{row['Link_BL']}" target="_blank" class="cot-btn bl">Buscalibre</a>
+                        <a href="{row['Link_GG']}" target="_blank" class="cot-btn gg">Google</a>
+                        """
+                    
+                    html_table += f"""<tr>
+                        <td>{ref_txt}</td>
+                        <td>{row['Tipo']}</td>
+                        <td>{btns}</td>
+                    </tr>"""
+                
+                html_table += "</tbody></table>"
+                st.markdown(html_table, unsafe_allow_html=True)
             else:
-                st.info("¡Todo el material está disponible en biblioteca!")
+                st.info("¡Todo encontrado!")
 
-            # Tabla completa oculta en un expander para mantener limpio el diseño
-            with st.expander("Ver Tabla Completa de Resultados"):
-                st.dataframe(df_final)
-            
             # Descarga
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                df_final.to_excel(writer, index=False)
-            
-            st.download_button("📥 Descargar Reporte Excel", buffer, "Reporte_V55.xlsx")
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False)
+            st.download_button("📥 Descargar Excel Completo", buf, "Resultado_V56.xlsx")
