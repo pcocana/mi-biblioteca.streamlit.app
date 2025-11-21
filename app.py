@@ -22,46 +22,33 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📚 Gestor Bibliotecario V48 (Deep Match)")
-st.markdown("Mejora: **Algoritmo 'Deep Match'**. Detecta títulos dentro de citas académicas largas, ignora comillas y editoriales.")
+st.title("📚 Gestor Bibliotecario V49 (Cascada)")
+st.markdown("Mejora: **Lógica en Cascada**. Recupera libros sin autor (Códigos, Manuales) y autores abreviados.")
 
-# --- FUNCIONES DE LIMPIEZA MEJORADAS ---
+# --- FUNCIONES ---
 
 def limpiar_texto(texto):
     if pd.isna(texto): return ""
     t = str(texto).lower()
-    # 1. Quitar URLs
-    t = re.sub(r'http\S+|www\.\S+', '', t) 
-    # 2. Quitar Años entre parentesis
-    t = re.sub(r'\(\d{4}\)', '', t) 
-    # 3. Quitar Comillas Tipográficas (El problema de tus archivos nuevos)
+    t = re.sub(r'http\S+|www\.\S+', '', t)
+    t = re.sub(r'\(\d{4}\)', '', t) # Quitar años parentesis
+    # Mantenemos numeros porque son importantes en química/física (ej: 7ma Edicion)
     t = t.replace('“', '').replace('”', '').replace('"', '').replace("'", "")
-    # 4. Normalizar tildes
     t = t.replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ó', 'o').replace('ú', 'u')
-    # 5. Dejar solo alfanuméricos y espacios
     t = re.sub(r'[^a-z0-9\s]', ' ', t)
     return " ".join(t.split())
 
 def generar_query_busqueda(raw_ref):
     if pd.isna(raw_ref): return ""
-    s = str(raw_ref)
-    # Limpieza básica para busqueda web
-    s_clean = s.replace('“', '').replace('”', '').replace('"', '')
-    
+    s = str(raw_ref).replace('“', '').replace('”', '')
     year = ""
-    year_match = re.search(r'\b(19|20)\d{2}\b', s_clean)
+    year_match = re.search(r'\b(19|20)\d{2}\b', s)
     if year_match: year = year_match.group(0)
     
-    # Intentar sacar lo más relevante (quitar urls, parentesis)
-    core = re.sub(r'http\S+', '', s_clean)
-    core = re.sub(r'\(\d{4}\)', '', core)
-    # Quedarse con las primeras 10 palabras si es muy largo
-    words = core.split()
-    if len(words) > 10: core = " ".join(words[:10])
-    
-    core = re.sub(r'[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ ]', ' ', core)
-    query = f"{core} {year}".strip()
-    return " ".join(query.split())
+    s_clean = re.sub(r'\(\d{4}\)', '', s)
+    # Tomar las primeras palabras clave
+    core = " ".join(re.sub(r'[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ ]', ' ', s_clean).split()[:12])
+    return f"{core} {year}".strip()
 
 def tokenize(str_val):
     if not str_val: return []
@@ -69,63 +56,70 @@ def tokenize(str_val):
 
 def es_articulo_real(texto):
     t = str(texto).lower()
-    # Lista estricta para no confundir libros
-    palabras_clave = ['revista', 'journal', 'doi.org', 'issn', 'transactions', 'proceedings', 'arxiv']
+    # Lista reducida para no confundir libros técnicos
+    palabras_clave = [' doi.org', 'issn', 'transactions', 'proceedings']
+    # Si dice "Journal" pero no parece editorial
+    if 'journal' in t and 'journal of' in t: return True
     return any(p in t for p in palabras_clave)
 
 def cargar_archivo(uploaded_file):
     if uploaded_file is None: return None
-    # Prioridad Excel
     if uploaded_file.name.endswith('.xlsx'):
         try:
             uploaded_file.seek(0)
             return pd.read_excel(uploaded_file, engine='openpyxl')
         except: pass
-    # Prioridad CSV
     try: uploaded_file.seek(0); return pd.read_csv(uploaded_file, sep=None, engine='python', encoding='utf-8')
     except: pass
     try: uploaded_file.seek(0); return pd.read_csv(uploaded_file, sep=None, engine='python', encoding='latin-1')
     except: pass
     return None
 
-# --- LÓGICA DE VALIDACIÓN V48 (DEEP MATCH) ---
-def validar_match_profundo(clean_ref, ref_tokens, book):
+# --- LÓGICA V49 (CASCADA) ---
+def validar_match_cascada(clean_ref, ref_tokens, book):
     """
-    Algoritmo asimétrico: Busca si el libro (pequeño) cabe dentro de la referencia (grande).
+    Retorna (Score, Metodo_Match)
     """
-    # 1. TÍTULO (Partial Token Set Ratio)
-    # Pregunta: ¿El título del libro está contenido en la referencia?
-    # Esto permite que "Optical Interconnects" haga match con "Optical Interconnects for Future Data Center..."
-    # Usamos 'partial_token_set_ratio' que es muy potente para esto.
-    
+    # 1. Título Parcial (¿El libro está en la referencia?)
     score_titulo = fuzz.partial_token_set_ratio(book['cleanTitle'], clean_ref)
     
-    # 2. AUTOR (Apellido Check)
-    # Si el título coincide muy bien, verificamos si AL MENOS UN APELLIDO del autor está.
+    # 2. Análisis de Autor
     hits_a = 0
     if len(book['aTokens']) > 0:
-        hits_a = sum(1 for a in book['aTokens'] if a in ref_tokens)
-    else:
-        # Si catálogo no tiene autor, somos neutrales
-        hits_a = 1 
-
-    # --- REGLAS DE DECISIÓN V48 ---
+        # Buscamos si CUALQUIER token del autor del libro está en la referencia
+        # Esto arregla "F.S. Hillier" vs "Hillier"
+        for a_tok in book['aTokens']:
+            if a_tok in ref_tokens:
+                hits_a += 1
     
-    # CASO A: Título está CASI EXACTO dentro de la referencia
-    if score_titulo >= 90:
-        if hits_a > 0: return 100 # Título excelente + Autor presente -> MATCH SEGURO
-        else: return 45 # Título excelente pero autor no aparece -> DUDOSO (Probablemente edición de otro autor)
-
-    # CASO B: Título muy parecido (>80)
-    if score_titulo >= 80:
-        if hits_a > 0: return 85 # Muy buen candidato
-        return 30
-
-    # CASO C: Título regular
-    if score_titulo >= 65:
-        if hits_a > 0: return 70 # El autor salva el match
+    has_author = (hits_a > 0)
     
-    return 0
+    # --- CASCADA DE DECISIÓN ---
+    
+    # NIVEL 1: Match Perfecto (Título Alto + Autor Presente)
+    if score_titulo >= 90 and has_author:
+        return 100, "Título y Autor Exactos"
+
+    # NIVEL 2: Título Único / Específico (Para libros sin autor claro o Manuales)
+    # Si el título es largo (> 15 letras) y coincide MUY bien, ignoramos al autor.
+    # Ej: "Código del Trabajo", "Perry's Chemical Engineers Handbook"
+    if score_titulo >= 95 and len(book['cleanTitle']) > 15:
+        return 95, "Título Único (Autor Ignorado)"
+
+    # NIVEL 3: Match Flexible (Título Bueno + Autor Presente)
+    if score_titulo >= 80 and has_author:
+        return 85, "Título Flexible + Autor"
+
+    # NIVEL 4: Título Muy Largo pero coincidencia media
+    # Ej: Referencias muy sucias pero el titulo largo se detecta
+    if score_titulo >= 85 and len(book['cleanTitle']) > 25:
+        return 80, "Título Largo Coincidente"
+
+    # Penalización para títulos cortos genéricos sin autor ("Física", "Química")
+    if len(book['cleanTitle']) < 12 and not has_author:
+        return 0, "Descarte por Genérico"
+
+    return 0, ""
 
 @st.cache_data
 def procesar_datos(file_ref, file_cat):
@@ -133,9 +127,9 @@ def procesar_datos(file_ref, file_cat):
     df_cat = cargar_archivo(file_cat)
     if df_ref is None or df_cat is None: return pd.DataFrame()
 
-    df_cat.columns = df_cat.columns.str.lower().str.strip()
+    df_cat.columns = df_cat.columns.astype(str).str.lower().str.strip()
     
-    # Detección Referencias (V45)
+    # Detección Referencias
     col_ref = None
     if len(df_ref.columns) == 1: col_ref = df_ref.columns[0]
     else:
@@ -147,7 +141,7 @@ def procesar_datos(file_ref, file_cat):
         col_tit = [c for c in df_cat.columns if 'tit' in c][0]
         col_aut = [c for c in df_cat.columns if 'aut' in c][0]
     except:
-        st.error("Error: El Catálogo debe tener columnas 'Título' y 'Autor'.")
+        st.error("Error: Faltan columnas Título/Autor en catálogo.")
         return pd.DataFrame()
     
     col_stock = next((c for c in df_cat.columns if any(x in c for x in ['ejem', 'copia', 'stock', 'cant'])), None)
@@ -162,8 +156,6 @@ def procesar_datos(file_ref, file_cat):
 
         t_tokens = tokenize(title)
         a_tokens = tokenize(author)
-        
-        # Limpieza extra para el catálogo (quitar simbolos)
         clean_t = limpiar_texto(title)
         
         key = "_".join(t_tokens) + "|" + "_".join(a_tokens)
@@ -182,13 +174,13 @@ def procesar_datos(file_ref, file_cat):
                 'tTokens': t_tokens, 
                 'aTokens': a_tokens, 
                 'stock': qty, 
-                'cleanTitle': clean_t # Usamos el titulo limpio completo para fuzz.partial
+                'cleanTitle': clean_t
             }
             stock_map[key] = obj
             catalogo_objs.append(obj)
 
     catalogo_final = list(stock_map.values())
-    # Índice para búsqueda rápida inicial (RapidFuzz)
+    # Usamos el título limpio para la búsqueda inicial
     titulos_busqueda = [c['cleanTitle'] for c in catalogo_final]
     
     resultados = []
@@ -205,46 +197,46 @@ def procesar_datos(file_ref, file_cat):
         stock = 0
         estado = "NO ENCONTRADO"
         match_nom = ""
+        match_metodo = ""
         tipo = "Libro"
         obs = ""
         
-        query_optimizada = generar_query_busqueda(raw)
-        q_url = query_optimizada.replace(' ', '+')
-        
-        link_bf = f"https://www.bookfinder.com/search/?keywords={q_url}&mode=basic&st=sr&ac=qr"
-        link_bl = f"https://www.buscalibre.cl/libros/search?q={q_url}"
-        link_gg = f"https://www.google.com/search?q={q_url}"
+        q_cotiz = re.sub(r'[^a-zA-Z0-9 ]', '', raw).replace(' ', '+')
+        link_bf = f"https://www.bookfinder.com/search/?keywords={q_cotiz}&mode=basic&st=sr&ac=qr"
+        link_bl = f"https://www.buscalibre.cl/libros/search?q={q_cotiz}"
+        link_gg = f"https://www.google.com/search?q={q_cotiz}"
 
         if es_articulo_real(raw):
             tipo = "Artículo"
             estado = "VERIFICAR ONLINE"
-            link_bf = f"https://scholar.google.com/scholar?q={q_url}"
-            link_gg = f"https://scholar.google.com/scholar?q={q_url}"
+            link_bf = f"https://scholar.google.com/scholar?q={q_cotiz}"
+            link_gg = f"https://scholar.google.com/scholar?q={q_cotiz}"
         
         elif len(clean_ref) > 5:
-            # 1. Extracción de Candidatos (Top 20)
-            # Usamos partial_token_set_ratio ya desde el principio para atrapar titulos escondidos
-            matches = process.extract(clean_ref, titulos_busqueda, scorer=fuzz.partial_token_set_ratio, limit=20)
+            # 1. Candidatos (Top 30 para buscar profundo)
+            matches = process.extract(clean_ref, titulos_busqueda, scorer=fuzz.partial_token_set_ratio, limit=30)
             
             best_score = 0
             best_match = None
+            best_method = ""
 
             for match_tuple in matches:
                 _, _, match_idx = match_tuple
                 book = catalogo_final[match_idx]
                 
-                # 2. Validación Profunda V48
-                score = validar_match_profundo(clean_ref, ref_tokens, book)
+                # 2. Validación V49
+                score, metodo = validar_match_cascada(clean_ref, ref_tokens, book)
                 
                 if score > best_score:
                     best_score = score
                     best_match = book
+                    best_method = metodo
 
-            if best_score >= 70: # Umbral V48
+            if best_score >= 80: # Umbral de aceptación
                 stock = best_match['stock']
                 match_nom = best_match['origTitle']
                 estado = "EN BIBLIOTECA" if stock > 0 else "FALTANTE (Stock 0)"
-                obs = f"Match: {match_nom} (Confianza: {best_score}%)"
+                obs = f"Match: {match_nom} | Método: {best_method} ({best_score}%)"
             else:
                 estado = "FALTANTE"
                 obs = "Sin coincidencia suficiente"
@@ -295,4 +287,4 @@ if f1 and f2:
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False)
-        st.download_button("📥 Descargar Excel", buf, "Resultado_Final_V48.xlsx")
+        st.download_button("📥 Descargar Excel", buf, "Resultado_Final_V49.xlsx")
