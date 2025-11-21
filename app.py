@@ -22,10 +22,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📚 Gestor Bibliotecario V46 (Cronos)")
-st.markdown("Mejora: **Filtro Cronológico**. Solo cuenta como stock válido las ediciones del año solicitado en adelante.")
+st.title("📚 Gestor Bibliotecario V47 (Tanque)")
+st.markdown("Mejora: **Resistencia a Fallos**. Si una fila da error, se salta y continúa con el resto.")
 
-# --- FUNCIONES AUXILIARES ---
+# --- FUNCIONES ---
 
 def limpiar_texto(texto):
     if pd.isna(texto): return ""
@@ -37,7 +37,6 @@ def limpiar_texto(texto):
     return " ".join(t.split())
 
 def extraer_anio(texto):
-    """Extrae el primer año (19xx o 20xx) encontrado en un texto o numero"""
     if pd.isna(texto): return 0
     s = str(texto)
     match = re.search(r'\b(19|20)\d{2}\b', s)
@@ -92,7 +91,6 @@ def cargar_archivo(uploaded_file):
     except: pass
     return None
 
-# --- LÓGICA DE VALIDACIÓN (V42) ---
 def validar_match(ref_tokens, book):
     t_hits = sum(1 for t in book['tTokens'] if t in ref_tokens)
     t_len = len(book['tTokens'])
@@ -125,7 +123,9 @@ def procesar_datos(file_ref, file_cat):
     df_cat = cargar_archivo(file_cat)
     if df_ref is None or df_cat is None: return pd.DataFrame()
 
-    df_cat.columns = df_cat.columns.str.lower().str.strip()
+    # --- BLINDAJE DE COLUMNAS V47 ---
+    # Convertimos headers a string para evitar error si hay numeros (ej: año 2022 como titulo)
+    df_cat.columns = df_cat.columns.astype(str).str.lower().str.strip()
     
     # Detección Referencias
     col_ref = None
@@ -143,46 +143,46 @@ def procesar_datos(file_ref, file_cat):
         return pd.DataFrame()
     
     col_stock = next((c for c in df_cat.columns if any(x in c for x in ['ejem', 'copia', 'stock', 'cant'])), None)
-    # --- NUEVO: Detección de Columna Año ---
     col_anio = next((c for c in df_cat.columns if any(x in c for x in ['fecha', 'año', 'ano', 'year', 'publi'])), None)
 
     catalogo_objs = []
     stock_map = {} 
 
-    # 1. INDEXAR CATÁLOGO CON AÑOS
+    # INDEXAR CATÁLOGO
     for idx, row in df_cat.iterrows():
-        title = str(row[col_tit])
-        author = str(row[col_aut]) if pd.notna(row[col_aut]) else ""
-        if len(title) < 2: continue
+        try: # Try/Except por fila
+            title = str(row[col_tit])
+            author = str(row[col_aut]) if pd.notna(row[col_aut]) else ""
+            if len(title) < 2: continue
 
-        t_tokens = tokenize(title)
-        a_tokens = tokenize(author)
-        key = "_".join(t_tokens) + "|" + "_".join(a_tokens)
-        
-        qty = 1
-        if col_stock and pd.notna(row[col_stock]):
-            try: qty = int(row[col_stock])
-            except: qty = 1
+            t_tokens = tokenize(title)
+            a_tokens = tokenize(author)
+            key = "_".join(t_tokens) + "|" + "_".join(a_tokens)
             
-        # Extraer año del libro
-        year_book = 0
-        if col_anio and pd.notna(row[col_anio]):
-            year_book = extraer_anio(row[col_anio])
+            qty = 1
+            if col_stock and pd.notna(row[col_stock]):
+                try: qty = int(row[col_stock])
+                except: qty = 1
+                
+            year_book = 0
+            if col_anio and pd.notna(row[col_anio]):
+                year_book = extraer_anio(row[col_anio])
 
-        if key not in stock_map:
-            stock_map[key] = {
-                'origTitle': title,
-                'origAuth': author,
-                'tTokens': t_tokens,
-                'aTokens': a_tokens,
-                'cleanTitle': " ".join(t_tokens),
-                'years_data': {} # Estructura: {2015: 3 copias, 2008: 1 copia}
-            }
-        
-        # Sumar stock al año específico
-        if year_book not in stock_map[key]['years_data']:
-            stock_map[key]['years_data'][year_book] = 0
-        stock_map[key]['years_data'][year_book] += qty
+            if key not in stock_map:
+                stock_map[key] = {
+                    'origTitle': title,
+                    'origAuth': author,
+                    'tTokens': t_tokens,
+                    'aTokens': a_tokens,
+                    'cleanTitle': " ".join(t_tokens),
+                    'years_data': {}
+                }
+            
+            if year_book not in stock_map[key]['years_data']:
+                stock_map[key]['years_data'][year_book] = 0
+            stock_map[key]['years_data'][year_book] += qty
+        except:
+            continue # Si falla una fila del catálogo, la saltamos
 
     catalogo_final = list(stock_map.values())
     titulos_busqueda = [c['cleanTitle'] for c in catalogo_final]
@@ -190,99 +190,96 @@ def procesar_datos(file_ref, file_cat):
     resultados = []
     progress_bar = st.progress(0)
     total = len(df_ref)
+    errores_count = 0
 
     for idx, row in df_ref.iterrows():
         if idx % 10 == 0: progress_bar.progress(min(idx / total, 1.0))
         
-        raw = str(row[col_ref])
-        ref_tokens = tokenize(raw)
-        clean_ref = " ".join(ref_tokens)
-        
-        # Extraer año solicitado en la referencia
-        ref_year = extraer_anio(raw)
-        
-        stock_valid = 0
-        stock_old = 0
-        estado = "NO ENCONTRADO"
-        match_nom = ""
-        tipo = "Libro"
-        obs = ""
-        
-        q_cotiz = re.sub(r'[^a-zA-Z0-9 ]', '', raw).replace(' ', '+')
-        link_bf = f"https://www.bookfinder.com/search/?keywords={q_cotiz}&mode=basic&st=sr&ac=qr"
-        link_bl = f"https://www.buscalibre.cl/libros/search?q={q_cotiz}"
-        link_gg = f"https://www.google.com/search?q={q_cotiz}"
+        try: # --- TRY/EXCEPT MAESTRO PARA REFERENCIAS ---
+            raw = str(row[col_ref])
+            ref_tokens = tokenize(raw)
+            clean_ref = " ".join(ref_tokens)
+            
+            ref_year = extraer_anio(raw)
+            
+            stock_valid = 0
+            stock_old = 0
+            estado = "NO ENCONTRADO"
+            match_nom = ""
+            tipo = "Libro"
+            obs = ""
+            
+            q_cotiz = re.sub(r'[^a-zA-Z0-9 ]', '', raw).replace(' ', '+')
+            link_bf = f"https://www.bookfinder.com/search/?keywords={q_cotiz}&mode=basic&st=sr&ac=qr"
+            link_bl = f"https://www.buscalibre.cl/libros/search?q={q_cotiz}"
+            link_gg = f"https://www.google.com/search?q={q_cotiz}"
 
-        if es_articulo_real(raw):
-            tipo = "Artículo"
-            estado = "VERIFICAR ONLINE"
-            link_bf = f"https://scholar.google.com/scholar?q={q_cotiz}"
-            link_gg = f"https://scholar.google.com/scholar?q={q_cotiz}"
-        
-        elif len(ref_tokens) > 1:
-            matches = process.extract(clean_ref, titulos_busqueda, scorer=fuzz.token_set_ratio, limit=15)
-            best_score = 0
-            best_match = None
+            if es_articulo_real(raw):
+                tipo = "Artículo"
+                estado = "VERIFICAR ONLINE"
+                link_bf = f"https://scholar.google.com/scholar?q={q_cotiz}"
+                link_gg = f"https://scholar.google.com/scholar?q={q_cotiz}"
+            
+            elif len(ref_tokens) > 1:
+                matches = process.extract(clean_ref, titulos_busqueda, scorer=fuzz.token_set_ratio, limit=15)
+                best_score = 0
+                best_match = None
 
-            for match_tuple in matches:
-                _, _, match_idx = match_tuple
-                book = catalogo_final[match_idx]
-                score = validar_match(ref_tokens, book)
-                if score > best_score:
-                    best_score = score
-                    best_match = book
+                for match_tuple in matches:
+                    _, _, match_idx = match_tuple
+                    book = catalogo_final[match_idx]
+                    score = validar_match(ref_tokens, book)
+                    if score > best_score:
+                        best_score = score
+                        best_match = book
 
-            if best_score >= 75:
-                match_nom = best_match['origTitle']
-                
-                # --- FILTRO CRONOLÓGICO V46 ---
-                years_found = []
-                years_discarded = []
-                
-                # Si la referencia no tiene año, aceptamos todo
-                strict_filter = (ref_year > 0)
-                
-                for y, q in best_match['years_data'].items():
-                    if not strict_filter or y == 0 or y >= ref_year:
-                        stock_valid += q
-                        years_found.append(f"{y} ({q} copias)")
+                if best_score >= 75:
+                    match_nom = best_match['origTitle']
+                    years_found = []
+                    years_discarded = []
+                    strict_filter = (ref_year > 0)
+                    
+                    for y, q in best_match['years_data'].items():
+                        if not strict_filter or y == 0 or y >= ref_year:
+                            stock_valid += q
+                            years_found.append(f"{y} ({q})")
+                        else:
+                            stock_old += q
+                            years_discarded.append(f"{y} ({q})")
+                    
+                    if stock_valid > 0:
+                        estado = "EN BIBLIOTECA"
+                        obs = f"✅: {', '.join(years_found)}"
+                        if stock_old > 0: obs += f" | ❌ Antiguos: {', '.join(years_discarded)}"
+                    elif stock_old > 0:
+                        estado = "FALTANTE (Edición Vieja)"
+                        obs = f"❌ Solo antiguos: {', '.join(years_discarded)}"
                     else:
-                        stock_old += q
-                        years_discarded.append(f"{y} ({q})")
-                
-                # Lógica de Estado
-                if stock_valid > 0:
-                    estado = "EN BIBLIOTECA"
-                    det_ok = ", ".join(years_found)
-                    obs = f"✅ Disponibles: {det_ok}"
-                    if stock_old > 0:
-                        obs += f" | ⚠️ Descartados (<{ref_year}): {', '.join(years_discarded)}"
-                elif stock_old > 0:
-                    # Caso especial: Tenemos el libro, pero solo ediciones viejas
-                    estado = "FALTANTE (Edición Vieja)"
-                    obs = f"❌ Solo ediciones antiguas: {', '.join(years_discarded)}"
+                        estado = "FALTANTE (Stock 0)"
+                        obs = f"Match: {match_nom} (Sin ejemplares)"
                 else:
-                    # Caso raro: Match sin stock (data sucia)
-                    estado = "FALTANTE (Stock 0)"
-                    obs = f"Match: {match_nom} (Sin ejemplares)"
+                    estado = "FALTANTE"
+                    obs = "No se encontró coincidencia"
 
-            else:
-                estado = "FALTANTE"
-                obs = "No se encontró coincidencia"
-
-        resultados.append({
-            "Referencia": raw,
-            "Estado": estado,
-            "Stock Vigente": stock_valid,
-            "Stock Descartado": stock_old,
-            "Match": match_nom,
-            "Ref Año": ref_year if ref_year > 0 else "N/D",
-            "Tipo": tipo,
-            "Observaciones": obs,
-            "Link_BF": link_bf, "Link_BL": link_bl, "Link_GG": link_gg
-        })
+            resultados.append({
+                "Referencia": raw,
+                "Estado": estado,
+                "Stock Vigente": stock_valid,
+                "Stock Descartado": stock_old,
+                "Match": match_nom,
+                "Ref Año": ref_year if ref_year > 0 else "N/D",
+                "Tipo": tipo,
+                "Observaciones": obs,
+                "Link_BF": link_bf, "Link_BL": link_bl, "Link_GG": link_gg
+            })
+        except:
+            errores_count += 1
+            continue # Saltamos la línea corrupta
     
     progress_bar.progress(100)
+    if errores_count > 0:
+        st.warning(f"⚠️ Se saltaron {errores_count} líneas por errores de formato en el archivo.")
+        
     return pd.DataFrame(resultados)
 
 # --- INTERFAZ ---
@@ -294,31 +291,43 @@ if f1 and f2:
     if st.button("🚀 PROCESAR", type="primary"):
         df = procesar_datos(f1, f2)
         
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total", len(df))
-        m2.metric("En Biblioteca (Vigentes)", len(df[df['Stock Vigente']>0]))
-        
-        # Faltantes reales (Stock 0) + Desactualizados (Solo Stock Viejo)
-        faltantes_reales = df[((df['Stock Vigente']==0)) & (df['Tipo']=='Libro')]
-        m3.metric("Faltantes Totales", len(faltantes_reales))
-        
-        desactualizados = df[(df['Stock Vigente']==0) & (df['Stock Descartado']>0)]
-        m4.metric("Solo Ed. Antiguas", len(desactualizados))
-        
-        st.divider()
-        st.subheader(f"🛒 Faltantes o Desactualizados ({len(faltantes_reales)})")
-        
-        if not faltantes_reales.empty:
-            for i, r in faltantes_reales.iterrows():
-                txt = str(r['Referencia'])[:100] + "..."
-                obs_alert = ""
-                if r['Stock Descartado'] > 0:
-                    obs_alert = f"⚠️ **OJO:** Tienes {r['Stock Descartado']} copias pero son antiguas ({r['Observaciones']})"
-                
-                c_txt, c_btn = st.columns([3,2])
-                with c_txt:
-                    st.write(f"**{txt}**")
-                    if obs_alert: st.caption(obs_alert)
-                with c_btn:
-                    st.markdown(f"""
-                        <a
+        if not df.empty:
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Total", len(df))
+            m2.metric("En Biblioteca (Vigentes)", len(df[df['Stock Vigente']>0]))
+            
+            faltantes_reales = df[((df['Stock Vigente']==0)) & (df['Tipo']=='Libro')]
+            m3.metric("Faltantes Totales", len(faltantes_reales))
+            
+            desactualizados = df[(df['Stock Vigente']==0) & (df['Stock Descartado']>0)]
+            m4.metric("Solo Ed. Antiguas", len(desactualizados))
+            
+            st.divider()
+            st.subheader(f"🛒 Faltantes o Desactualizados ({len(faltantes_reales)})")
+            
+            if not faltantes_reales.empty:
+                for i, r in faltantes_reales.iterrows():
+                    txt = str(r['Referencia'])[:100] + "..."
+                    obs_alert = ""
+                    if r['Stock Descartado'] > 0:
+                        obs_alert = f"⚠️ **OJO:** Tienes {r['Stock Descartado']} copias pero son antiguas ({r['Observaciones']})"
+                    
+                    c_txt, c_btn = st.columns([3,2])
+                    with c_txt:
+                        st.write(f"**{txt}**")
+                        if obs_alert: st.caption(obs_alert)
+                    with c_btn:
+                        st.markdown(f"""
+                            <a href="{r['Link_BF']}" target="_blank" class="cot-btn bf">BookFinder</a>
+                            <a href="{r['Link_BL']}" target="_blank" class="cot-btn bl">Buscalibre</a>
+                            <a href="{r['Link_GG']}" target="_blank" class="cot-btn gg">Google</a>
+                        """, unsafe_allow_html=True)
+                    st.divider()
+            else: st.info("¡Biblioteca al día! Todo el material está disponible.")
+            
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False)
+            st.download_button("📥 Descargar Excel", buf, "Resultado_Final_V47.xlsx")
+        else:
+            st.error("El archivo resultante está vacío. Revisa que tus Excels tengan datos.")
