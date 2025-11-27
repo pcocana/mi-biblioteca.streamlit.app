@@ -3,288 +3,522 @@ import pandas as pd
 import re
 from rapidfuzz import process, fuzz
 import io
+import unicodedata
 
-# --- CONFIGURACIÓN VISUAL ---
-st.set_page_config(page_title="Gestor Bibliotecario V55", page_icon="🏛️", layout="wide")
+# ==========================================
+# CONFIGURACIÓN DE LA PÁGINA
+# ==========================================
+st.set_page_config(
+    page_title="Gestor Bibliotecario AI",
+    page_icon="📚",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.markdown("""
-<style>
-    .stButton button { width: 100%; background-color: #2e86de; color: white; font-weight: bold; }
-    .cot-btn {
-        display: inline-block; padding: 6px 12px; margin: 0 2px;
-        border-radius: 4px; text-decoration: none; color: white !important;
-        font-size: 12px; font-weight: bold; text-align: center; transition: 0.2s;
-    }
-    .bf { background-color: #341f97; } 
-    .bl { background-color: #fbc531; color: #2f3640 !important; } 
-    .gg { background-color: #7f8fa6; } 
-    .cot-btn:hover { opacity: 0.8; transform: translateY(-1px); }
-    .report-box { padding: 15px; border-radius: 10px; background-color: #f1f2f6; border: 1px solid #ced6e0; margin-bottom: 10px; }
-</style>
-""", unsafe_allow_html=True)
+# ==========================================
+# CONFIGURACIÓN AJUSTABLE (SIDEBAR)
+# ==========================================
+with st.sidebar:
+    st.header("⚙️ Configuración")
+    
+    UMBRAL_SIMILITUD = st.slider(
+        "Umbral de similitud (%)",
+        min_value=50,
+        max_value=95,
+        value=70,
+        step=5,
+        help="Porcentaje mínimo de similitud para considerar un match válido"
+    )
+    
+    MOSTRAR_DEBUG = st.checkbox("Mostrar info de depuración", value=False)
+    
+    st.markdown("---")
+    st.markdown("""
+    ### 📖 Cómo usar:
+    1. Sube tu archivo de **Referencias** (bibliografía)
+    2. Sube tu archivo de **Catálogo** (libros disponibles)
+    3. Presiona **Procesar**
+    4. Descarga el resultado
+    
+    ### 📌 Formatos aceptados:
+    - Excel (.xlsx, .xls)
+    - CSV (.csv)
+    
+    ### 🔍 El sistema detecta:
+    - Libros en stock
+    - Libros sin stock
+    - Artículos científicos
+    - Referencias a cotizar
+    """)
 
-st.title("🏛️ Gestor Bibliotecario V55")
-st.markdown("Motor de Acumulación V54 + Cotizador Visual Integrado.")
+# ==========================================
+# FUNCIONES AUXILIARES
+# ==========================================
 
-# --- 1. FUNCIONES DE LIMPIEZA Y BÚSQUEDA ---
+def normalizar_texto(texto):
+    """Normaliza texto eliminando acentos y caracteres especiales"""
+    if pd.isna(texto):
+        return ""
+    
+    # Convertir a string y normalizar Unicode
+    texto = str(texto)
+    texto = unicodedata.normalize('NFKD', texto)
+    texto = ''.join([c for c in texto if not unicodedata.combining(c)])
+    
+    return texto.lower()
 
 def limpiar_texto(texto):
-    if pd.isna(texto): return ""
-    t = str(texto).lower()
-    t = t.replace('“', '').replace('”', '').replace('"', '').replace("'", "")
-    t = t.replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ó', 'o').replace('ú', 'u')
-    t = re.sub(r'[^a-z\s]', ' ', t)
+    """Limpieza profunda: quita URLs, años y caracteres raros"""
+    if pd.isna(texto):
+        return ""
+    
+    t = normalizar_texto(texto)
+    
+    # Quitar URLs
+    t = re.sub(r'http\S+|www\.\S+', '', t)
+    
+    # Quitar años entre paréntesis (2020)
+    t = re.sub(r'\(\d{4}\)', '', t)
+    
+    # Quitar caracteres no alfanuméricos
+    t = re.sub(r'[^a-z0-9\s]', ' ', t)
+    
+    # Colapsar espacios múltiples
     return " ".join(t.split())
 
-def generar_query_busqueda(raw_ref):
-    """Genera una búsqueda limpia para los botones (Autor + Título + Año)"""
-    if pd.isna(raw_ref): return ""
-    s = str(raw_ref).replace('“', '').replace('”', '')
-    
-    year = ""
-    match = re.search(r'\b(19|20)\d{2}\b', s)
-    if match: year = match.group(0)
-    
-    s_clean = re.sub(r'\(\d{4}\)', '', s) # Quitar año parentesis
-    # Limpiar caracteres raros y tomar primeras 10 palabras
-    core = re.sub(r'[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ ]', ' ', s_clean)
-    words = core.split()
-    short_core = " ".join(words[:12])
-    
-    return f"{short_core} {year}".strip()
-
-def es_articulo_real(texto):
+def es_articulo_cientifico(texto):
+    """Detecta si la referencia es un artículo científico"""
     t = str(texto).lower()
-    palabras_clave = [' doi.org', 'issn', 'transactions', 'proceedings']
-    if 'journal' in t and 'journal of' in t: return True
-    return any(p in t for p in palabras_clave)
+    
+    indicadores = [
+        'revista', 'journal', 'doi.org', 'issn', 
+        'transactions', 'proceedings', 'vol.', 'no.',
+        'pp.', 'issue', 'quarterly', 'annual'
+    ]
+    
+    return any(indicador in t for indicador in indicadores)
 
-def extraer_anio(texto):
-    if pd.isna(texto): return 0
-    match = re.search(r'\b(19|20)\d{2}\b', str(texto))
-    return int(match.group(0)) if match else 0
+def detectar_columna(df, posibles_nombres, nombre_tipo="columna"):
+    """
+    Detecta columna de forma inteligente con manejo de errores
+    
+    Args:
+        df: DataFrame
+        posibles_nombres: Lista de strings para buscar en nombres de columnas
+        nombre_tipo: Nombre descriptivo para mensajes de error
+    
+    Returns:
+        str: Nombre de la columna encontrada
+    
+    Raises:
+        ValueError: Si no encuentra ninguna columna válida
+    """
+    columnas_encontradas = [
+        col for col in df.columns 
+        if any(nombre in col for nombre in posibles_nombres)
+    ]
+    
+    if not columnas_encontradas:
+        raise ValueError(
+            f"No se encontró {nombre_tipo}. "
+            f"Se esperaba alguna de: {', '.join(posibles_nombres)}. "
+            f"Columnas disponibles: {', '.join(df.columns)}"
+        )
+    
+    return columnas_encontradas[0]
 
-def generar_tokens(texto):
-    return set(limpiar_texto(texto).split())
-
-# --- 2. LECTURA DE ARCHIVOS (ROBUSTA) ---
-
-def leer_referencias_raw(uploaded_file):
+def cargar_archivo(uploaded_file):
+    """Carga archivo Excel o CSV con manejo robusto de errores"""
     try:
-        content = uploaded_file.getvalue().decode("latin-1")
-        lines = content.splitlines()
-        data = []
-        buffer = ""
-        for line in lines:
-            line = line.strip()
-            if not line: continue
-            if "Referencia" in line and "Unidad" in line: continue
-            
-            if len(line) < 10 or line.count(';') == 0:
-                buffer += " " + line
-            else:
-                if buffer: data.append(buffer)
-                buffer = line
-        if buffer: data.append(buffer)
+        if uploaded_file.name.endswith('.csv'):
+            # Intentar diferentes encodings
+            try:
+                df = pd.read_csv(uploaded_file, encoding='utf-8')
+            except UnicodeDecodeError:
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, encoding='latin-1')
+        else:
+            df = pd.read_excel(uploaded_file)
         
-        clean_data = [row.split(';')[0] for row in data if len(row) > 5]
-        return pd.DataFrame(clean_data, columns=["Referencias"])
+        # Normalizar nombres de columnas
+        df.columns = df.columns.str.lower().str.strip()
+        
+        return df, None
+        
     except Exception as e:
-        st.error(f"Error lectura manual: {e}")
-        return pd.DataFrame()
+        return None, f"Error al leer archivo: {str(e)}"
 
-def leer_catalogo_pandas(uploaded_file):
+# ==========================================
+# FUNCIÓN PRINCIPAL DE PROCESAMIENTO
+# ==========================================
+
+def procesar_referencias(df_ref, df_cat, umbral):
+    """
+    Procesa referencias contra catálogo
+    
+    Args:
+        df_ref: DataFrame de referencias
+        df_cat: DataFrame de catálogo
+        umbral: Umbral de similitud (0-100)
+    
+    Returns:
+        DataFrame con resultados
+    """
+    
+    # 1. DETECTAR COLUMNAS CLAVE
     try:
-        uploaded_file.seek(0)
-        return pd.read_csv(uploaded_file, sep=';', encoding='latin-1', on_bad_lines='skip')
-    except:
+        col_ref = detectar_columna(
+            df_ref, 
+            ['ref', 'bib', 'titulo', 'title', 'citation'],
+            "columna de referencias"
+        )
+        
+        col_tit = detectar_columna(
+            df_cat,
+            ['tit', 'title', 'nombre', 'libro'],
+            "columna de título"
+        )
+        
+        col_aut = detectar_columna(
+            df_cat,
+            ['aut', 'author', 'autor', 'escritor'],
+            "columna de autor"
+        )
+        
+        # Stock es opcional
         try:
-            uploaded_file.seek(0)
-            return pd.read_excel(uploaded_file)
-        except: return None
-
-# --- 3. PROCESAMIENTO ---
-
-@st.cache_data
-def procesar_bibliografia(file_ref, file_cat):
-    df_ref = leer_referencias_raw(file_ref)
-    df_cat = leer_catalogo_pandas(file_cat)
-    
-    if df_ref.empty or df_cat is None: return None
-
-    df_cat.columns = df_cat.columns.astype(str).str.lower().str.strip()
-    
-    try:
-        col_tit = [c for c in df_cat.columns if 'tit' in c][0]
-        col_aut = [c for c in df_cat.columns if 'aut' in c][0]
-        col_stock = [c for c in df_cat.columns if 'ejem' in c or 'copia' in c][0]
-        col_anio = [c for c in df_cat.columns if 'fecha' in c or 'año' in c or 'year' in c][0]
-    except:
-        st.error("Error columnas catálogo (requiere Título, Autor, Ejemplares, Año)")
+            col_stock = detectar_columna(
+                df_cat,
+                ['ejem', 'copia', 'stock', 'cant', 'disponible'],
+                "columna de stock"
+            )
+        except ValueError:
+            col_stock = None
+            st.warning("⚠️ No se detectó columna de stock. Se asumirá stock = 1 para todos los libros.")
+        
+    except ValueError as e:
+        st.error(f"❌ Error en estructura de archivos: {str(e)}")
         return None
-
-    # --- INDEXACIÓN (ACUMULADOR) ---
-    catalogo_index = {}
     
-    for idx, row in df_cat.iterrows():
-        titulo = str(row[col_tit])
-        autor = str(row[col_aut]) if pd.notna(row[col_aut]) else ""
-        try: stock = int(row[col_stock])
-        except: stock = 1
-        try: anio = int(row[col_anio])
-        except: anio = extraer_anio(str(row[col_anio]))
-
-        t_clean = limpiar_texto(titulo)
-        if len(t_clean) < 3: continue
-        
-        clave = t_clean 
-        
-        if clave not in catalogo_index:
-            catalogo_index[clave] = {
-                'titulo_oficial': titulo,
-                'autor_oficial': autor,
-                'stock_total': 0,
-                'detalles_anios': [],
-                'tokens_titulo': generar_tokens(titulo),
-                'tokens_autor': generar_tokens(autor)
-            }
-        
-        catalogo_index[clave]['stock_total'] += stock
-        catalogo_index[clave]['detalles_anios'].append(f"{anio} ({stock})")
-
-    claves_catalogo = list(catalogo_index.keys())
+    # 2. PREPARAR CATÁLOGO
+    st.info(f"📊 Columnas detectadas - Referencias: `{col_ref}` | Catálogo: `{col_tit}`, `{col_aut}`" + 
+            (f", `{col_stock}`" if col_stock else ""))
     
+    # Crear campo de búsqueda combinado
+    df_cat['busqueda'] = (
+        df_cat[col_tit].fillna('') + " " + 
+        df_cat[col_aut].fillna('')
+    )
+    df_cat['busqueda_clean'] = df_cat['busqueda'].apply(limpiar_texto)
+    
+    # Crear diccionarios de búsqueda
+    if col_stock:
+        df_cat[col_stock] = pd.to_numeric(df_cat[col_stock], errors='coerce').fillna(1)
+        catalogo_stock = df_cat.groupby('busqueda_clean')[col_stock].sum().to_dict()
+    else:
+        catalogo_stock = {key: 1 for key in df_cat['busqueda_clean'].unique()}
+    
+    catalogo_nombres = df_cat.groupby('busqueda_clean')[col_tit].first().to_dict()
+    catalogo_autores = df_cat.groupby('busqueda_clean')[col_aut].first().to_dict()
+    
+    lista_claves = list(catalogo_stock.keys())
+    
+    # 3. PROCESAR REFERENCIAS
     resultados = []
-    progreso = st.progress(0)
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
     total_refs = len(df_ref)
     
-    for i, row in df_ref.iterrows():
-        progreso.progress(min((i+1)/total_refs, 1.0))
+    for idx, row in df_ref.iterrows():
+        # Actualizar progreso
+        progreso = (idx + 1) / total_refs
+        progress_bar.progress(progreso)
+        status_text.text(f"Procesando referencia {idx + 1} de {total_refs}...")
         
-        raw_ref = str(row["Referencias"])
-        if len(raw_ref) < 5: continue
+        raw = str(row[col_ref])
+        clean = limpiar_texto(raw)
         
-        clean_ref = limpiar_texto(raw_ref)
-        ref_tokens = generar_tokens(raw_ref)
-        ref_anio = extraer_anio(raw_ref)
+        # Inicializar resultado
+        resultado = {
+            "Referencia Original": raw,
+            "Estado": "NO ENCONTRADO",
+            "Stock": 0,
+            "Título Catálogo": "",
+            "Autor Catálogo": "",
+            "Tipo": "Libro",
+            "Similitud": 0,
+            "Link Cotización": "",
+            "Observaciones": ""
+        }
         
-        # Generar Links para Botones
-        query_url = generar_query_busqueda(raw_ref).replace(" ", "+")
-        link_bf = f"https://www.bookfinder.com/search/?keywords={query_url}&mode=basic&st=sr&ac=qr"
-        link_bl = f"https://www.buscalibre.cl/libros/search?q={query_url}"
-        link_gg = f"https://www.google.com/search?q={query_url}"
+        # CASO 1: Detectar artículos científicos
+        if es_articulo_cientifico(raw):
+            resultado.update({
+                "Tipo": "Artículo Científico",
+                "Estado": "VERIFICAR ONLINE",
+                "Observaciones": "Posible paper/revista científica",
+                "Link Cotización": f"https://scholar.google.com/scholar?q={raw.replace(' ', '+')}"
+            })
         
-        tipo = "Libro"
-        if es_articulo_real(raw_ref):
-            tipo = "Artículo"
-            link_bf = f"https://scholar.google.com/scholar?q={query_url}"
-            link_bl = link_bf
-            link_gg = link_bf
-
-        # Match
-        match = process.extractOne(clean_ref, claves_catalogo, scorer=fuzz.token_set_ratio)
-        
-        estado = "NO ENCONTRADO"
-        stock_encontrado = 0
-        detalle_match = ""
-        info_extra = ""
-        
-        if match:
-            clave_encontrada, puntaje, _ = match
-            libro_cat = catalogo_index[clave_encontrada]
+        # CASO 2: Buscar en catálogo
+        elif len(clean) > 3:
+            match = process.extractOne(
+                clean, 
+                lista_claves, 
+                scorer=fuzz.token_set_ratio
+            )
             
-            autor_coincide = False
-            if not libro_cat['tokens_autor']: autor_coincide = True 
-            else:
-                if len(libro_cat['tokens_autor'].intersection(ref_tokens)) > 0: autor_coincide = True
-            
-            if puntaje >= 80 and autor_coincide:
-                stock_encontrado = libro_cat['stock_total']
-                anios_str = ", ".join(libro_cat['detalles_anios'])
+            if match:
+                mejor_key, similitud, _ = match
                 
-                if stock_encontrado > 0:
-                    estado = "EN BIBLIOTECA"
-                    detalle_match = libro_cat['titulo_oficial']
-                    info_extra = f"Total: {stock_encontrado} | Copias: {anios_str}"
+                # MATCH ENCONTRADO
+                if similitud >= umbral:
+                    stock = int(catalogo_stock.get(mejor_key, 0))
+                    titulo = catalogo_nombres.get(mejor_key, "")
+                    autor = catalogo_autores.get(mejor_key, "")
                     
-                    if ref_anio > 0:
-                        anios_nums = [int(re.search(r'\d+', x).group()) for x in libro_cat['detalles_anios'] if re.search(r'\d+', x)]
-                        if anios_nums and max(anios_nums) < ref_anio:
-                            estado = "EN BIBLIOTECA (Desactualizado)"
-                            info_extra += " ⚠️ Solo ediciones antiguas."
+                    resultado.update({
+                        "Estado": "EN BIBLIOTECA" if stock > 0 else "FALTANTE (Stock 0)",
+                        "Stock": stock,
+                        "Título Catálogo": titulo,
+                        "Autor Catálogo": autor,
+                        "Similitud": round(similitud),
+                        "Observaciones": f"Match encontrado con {round(similitud)}% de similitud"
+                    })
+                
+                # NO HAY MATCH SUFICIENTE
                 else:
-                    estado = "FALTANTE (Stock 0)"
-            else:
-                estado = "FALTANTE"
-
-        resultados.append({
-            "Referencia Original": raw_ref,
-            "Estado": estado,
-            "Stock Total": stock_encontrado,
-            "Detalle Existencias": info_extra,
-            "Match Título": detalle_match,
-            "Tipo": tipo,
-            "Link_BF": link_bf, "Link_BL": link_bl, "Link_GG": link_gg
-        })
+                    resultado.update({
+                        "Estado": "COTIZAR",
+                        "Similitud": round(similitud),
+                        "Observaciones": f"Similitud insuficiente ({round(similitud)}% < {umbral}%)",
+                        "Link Cotización": generar_link_cotizacion(raw)
+                    })
         
+        # CASO 3: Referencia muy corta
+        else:
+            resultado["Observaciones"] = "Referencia demasiado corta para analizar"
+        
+        resultados.append(resultado)
+    
+    progress_bar.empty()
+    status_text.empty()
+    
     return pd.DataFrame(resultados)
 
-# --- INTERFAZ ---
+def generar_link_cotizacion(referencia):
+    """Genera link de BookFinder para cotización"""
+    # Limpiar texto para URL
+    texto_limpio = re.sub(r'[^a-zA-Z0-9 ]', '', referencia)
+    query = texto_limpio.replace(' ', '+')
+    
+    return f"https://www.bookfinder.com/search/?keywords={query}&mode=basic&st=sr&ac=qr"
 
-c1, c2 = st.columns(2)
-archivo_ref = c1.file_uploader("1. Referencias", type=['csv','xlsx'])
-archivo_cat = c2.file_uploader("2. Catálogo", type=['csv','xlsx'])
+# ==========================================
+# INTERFAZ PRINCIPAL
+# ==========================================
 
-if archivo_ref and archivo_cat:
-    if st.button("🔍 AUDITAR Y COTIZAR", type="primary"):
-        with st.spinner("Procesando..."):
-            df_final = procesar_bibliografia(archivo_ref, archivo_cat)
+st.title("📚 Gestor Bibliotecario Inteligente")
+st.markdown("""
+Esta aplicación cruza automáticamente tu lista de **Referencias** con el **Catálogo**, 
+detectando existencias reales, artículos científicos y corrigiendo errores de escritura.
+
+---
+""")
+
+# Columnas para carga de archivos
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("1️⃣ Cargar Referencias")
+    uploaded_ref = st.file_uploader(
+        "Sube archivo de Referencias (Excel/CSV)",
+        type=['csv', 'xlsx', 'xls'],
+        help="Archivo con la bibliografía a verificar"
+    )
+    
+    if uploaded_ref:
+        st.success(f"✅ Archivo cargado: {uploaded_ref.name}")
+
+with col2:
+    st.subheader("2️⃣ Cargar Catálogo")
+    uploaded_cat = st.file_uploader(
+        "Sube archivo de Catálogo (Excel/CSV)",
+        type=['csv', 'xlsx', 'xls'],
+        help="Archivo con los libros disponibles en biblioteca"
+    )
+    
+    if uploaded_cat:
+        st.success(f"✅ Archivo cargado: {uploaded_cat.name}")
+
+# Botón de procesamiento
+if uploaded_ref and uploaded_cat:
+    
+    st.markdown("---")
+    
+    if st.button("🚀 INICIAR PROCESAMIENTO", type="primary", use_container_width=True):
         
-        if df_final is not None:
-            total = len(df_final)
-            encontrados = len(df_final[df_final['Stock Total'] > 0])
-            faltantes_df = df_final[df_final['Stock Total'] == 0]
+        # Cargar archivos
+        with st.spinner('📖 Leyendo archivos...'):
+            df_ref, error_ref = cargar_archivo(uploaded_ref)
+            df_cat, error_cat = cargar_archivo(uploaded_cat)
+        
+        # Validar carga
+        if error_ref:
+            st.error(f"Error en archivo de referencias: {error_ref}")
+        elif error_cat:
+            st.error(f"Error en archivo de catálogo: {error_cat}")
+        else:
+            # Mostrar preview
+            with st.expander("👀 Vista previa de datos cargados"):
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.write("**Referencias:**")
+                    st.dataframe(df_ref.head(3), use_container_width=True)
+                with col_b:
+                    st.write("**Catálogo:**")
+                    st.dataframe(df_cat.head(3), use_container_width=True)
             
-            st.success("Proceso completado")
+            # Procesar
+            with st.spinner('🤖 El bibliotecario digital está trabajando...'):
+                df_result = procesar_referencias(df_ref, df_cat, UMBRAL_SIMILITUD)
             
-            col_a, col_b, col_c = st.columns(3)
-            col_a.metric("Referencias", total)
-            col_b.metric("En Biblioteca", encontrados)
-            col_c.metric("Faltantes", len(faltantes_df))
-            
-            # --- COTIZADOR VISUAL (VUELVE EL DISEÑO V43) ---
-            st.divider()
-            st.subheader(f"🛒 Cotizador de Faltantes ({len(faltantes_df)})")
-            
-            if not faltantes_df.empty:
-                # Mostrar solo los primeros 50 para no saturar, o todos
-                for i, row in faltantes_df.iterrows():
-                    txt = row['Referencia Original'][:120] + "..."
-                    tipo_lbl = f"[{row['Tipo']}]"
+            if df_result is not None:
+                st.success("✅ ¡Proceso Completado!")
+                
+                # MÉTRICAS
+                st.markdown("### 📊 Resumen de Resultados")
+                
+                col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+                
+                total = len(df_result)
+                en_biblio = len(df_result[df_result['Stock'] > 0])
+                faltantes = len(df_result[df_result['Estado'] == 'FALTANTE (Stock 0)'])
+                articulos = len(df_result[df_result['Tipo'] == 'Artículo Científico'])
+                cotizar = len(df_result[df_result['Estado'] == 'COTIZAR'])
+                
+                col_m1.metric("📚 Total Referencias", total)
+                col_m2.metric("✅ En Biblioteca", en_biblio, 
+                             delta=f"{round(en_biblio/total*100)}%" if total > 0 else "0%")
+                col_m3.metric("⚠️ Por Cotizar", cotizar)
+                col_m4.metric("📄 Artículos", articulos)
+                
+                # TABLA DE RESULTADOS
+                st.markdown("### 📋 Tabla de Resultados")
+                
+                # Filtros
+                filtro_col1, filtro_col2 = st.columns(2)
+                
+                with filtro_col1:
+                    filtro_estado = st.multiselect(
+                        "Filtrar por Estado:",
+                        options=df_result['Estado'].unique(),
+                        default=df_result['Estado'].unique()
+                    )
+                
+                with filtro_col2:
+                    filtro_tipo = st.multiselect(
+                        "Filtrar por Tipo:",
+                        options=df_result['Tipo'].unique(),
+                        default=df_result['Tipo'].unique()
+                    )
+                
+                # Aplicar filtros
+                df_filtrado = df_result[
+                    (df_result['Estado'].isin(filtro_estado)) &
+                    (df_result['Tipo'].isin(filtro_tipo))
+                ]
+                
+                # Mostrar tabla
+                st.dataframe(
+                    df_filtrado,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Link Cotización": st.column_config.LinkColumn("🔗 Cotizar"),
+                        "Stock": st.column_config.NumberColumn("📦 Stock", format="%d"),
+                        "Similitud": st.column_config.NumberColumn("🎯 Similitud", format="%d%%")
+                    }
+                )
+                
+                # BOTÓN DE DESCARGA
+                st.markdown("### 💾 Descargar Resultados")
+                
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                    df_result.to_excel(writer, index=False, sheet_name='Resultados')
                     
-                    c_txt, c_btn = st.columns([3, 2])
-                    with c_txt:
-                        st.write(f"**{tipo_lbl} {txt}**")
-                    with c_btn:
-                        if row['Tipo'] == "Artículo":
-                            st.markdown(f"""<a href="{row['Link_BF']}" target="_blank" class="cot-btn gg">Google Scholar</a>""", unsafe_allow_html=True)
-                        else:
-                            st.markdown(f"""
-                                <a href="{row['Link_BF']}" target="_blank" class="cot-btn bf">BookFinder</a>
-                                <a href="{row['Link_BL']}" target="_blank" class="cot-btn bl">Buscalibre</a>
-                                <a href="{row['Link_GG']}" target="_blank" class="cot-btn gg">Google</a>
-                            """, unsafe_allow_html=True)
-                    st.divider()
-            else:
-                st.info("¡Todo el material está disponible en biblioteca!")
+                    # Formato mejorado
+                    workbook = writer.book
+                    worksheet = writer.sheets['Resultados']
+                    
+                    # Formatos
+                    header_format = workbook.add_format({
+                        'bold': True,
+                        'bg_color': '#4472C4',
+                        'font_color': 'white',
+                        'border': 1
+                    })
+                    
+                    link_format = workbook.add_format({
+                        'font_color': 'blue',
+                        'underline': 1
+                    })
+                    
+                    # Aplicar formato a encabezados
+                    for col_num, value in enumerate(df_result.columns.values):
+                        worksheet.write(0, col_num, value, header_format)
+                    
+                    # Ajustar anchos de columna
+                    worksheet.set_column('A:A', 50)  # Referencia
+                    worksheet.set_column('B:B', 20)  # Estado
+                    worksheet.set_column('C:C', 8)   # Stock
+                    worksheet.set_column('D:D', 35)  # Título
+                    worksheet.set_column('E:E', 25)  # Autor
+                    worksheet.set_column('F:F', 15)  # Tipo
+                    worksheet.set_column('G:G', 10)  # Similitud
+                    worksheet.set_column('H:H', 40)  # Link
+                    worksheet.set_column('I:I', 40)  # Observaciones
+                    
+                    # Aplicar formato de link
+                    for row_num, url in enumerate(df_result['Link Cotización'], start=1):
+                        if url:
+                            worksheet.write_url(row_num, 7, url, link_format, string="Cotizar")
+                
+                st.download_button(
+                    label="📥 Descargar Excel Completo",
+                    data=buffer.getvalue(),
+                    file_name=f"Resultados_Biblioteca_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+                
+                # INFO DE DEBUG
+                if MOSTRAR_DEBUG:
+                    with st.expander("🔧 Información de Depuración"):
+                        st.write("**Estadísticas del procesamiento:**")
+                        st.json({
+                            "Total referencias": total,
+                            "En biblioteca": en_biblio,
+                            "Faltantes": faltantes,
+                            "Artículos": articulos,
+                            "Por cotizar": cotizar,
+                            "Umbral usado": UMBRAL_SIMILITUD,
+                            "Columnas detectadas": {
+                                "Referencias": list(df_ref.columns),
+                                "Catálogo": list(df_cat.columns)
+                            }
+                        })
 
-            # Tabla completa oculta en un expander para mantener limpio el diseño
-            with st.expander("Ver Tabla Completa de Resultados"):
-                st.dataframe(df_final)
-            
-            # Descarga
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                df_final.to_excel(writer, index=False)
-            
-            st.download_button("📥 Descargar Reporte Excel", buffer, "Reporte_V55.xlsx")
+else:
+    st.info("👆 Por favor, carga ambos archivos para comenzar el procesamiento.")
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: #666;'>
+    <p>Gestor Bibliotecario Inteligente | Versión 2.0 | 
+    Desarrollado con ❤️ usando Streamlit</p>
+</div>
+""", unsafe_allow_html=True)
